@@ -748,6 +748,7 @@ class AccessTests(unittest.TestCase):
         with patch("noisechat.relay.serve") as serve, patch("noisechat.cli.getpass.getpass", return_value=SERVER_PASSWORD) as prompt, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(args), 0)
             self.assertEqual(prompt.call_count, 2)
+            self.assertEqual(prompt.call_args_list[0].args, ("Enter a server password (12+ characters): ",))
             self.assertTrue(serve.call_args.args[-1].verify(SERVER_PASSWORD))
             prompt.reset_mock()
             self.assertEqual(cli.main(args), 0)

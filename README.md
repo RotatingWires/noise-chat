@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.1
+# NoiseChat v0.4.2
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -17,6 +17,7 @@ One shared random key identifies one chat. Give friends a password-encrypted cop
 - SQLite through Python's built-in `sqlite3`, with WAL mode for retained ciphertext.
 - `cryptography` for AES-256-GCM, HKDF, and scrypt.
 - `keyring` for native OS credential storage on clients.
+- `prompt_toolkit` for editable chat input, clearing submitted text, and displaying incoming messages while you type.
 - `setuptools` and pip for packaging and the installed `noisechat` command.
 
 ## Backend
@@ -74,7 +75,7 @@ Requires Python 3.11 or newer. From this project folder:
 python -m pip install .
 ```
 
-This installs `noisechat` plus two dependencies: `cryptography` and `keyring`. On Windows, `py` can be used instead of `python`. If the `noisechat` command isn't on your PATH, use `python -m noisechat` from this folder.
+This installs `noisechat` and its dependencies: `cryptography`, `keyring`, and `prompt_toolkit`. On Windows, `py` can be used instead of `python`. If the `noisechat` command isn't on your PATH, use `python -m noisechat` from this folder.
 
 A virtual environment is useful if your Linux distribution restricts system-wide pip installs:
 
@@ -128,7 +129,7 @@ noisechat chat friends --server "http://127.0.0.1:8713" --name Alice
 noisechat chat friends --server "http://127.0.0.1:8713" --name Bob
 ```
 
-Type a message and press Enter. Everyone in the channel receives an encrypted `[Wall] Alice joined the chat.` announcement when Alice connects. `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and join announcements appear when you connect. Incoming messages print as they arrive, so they may appear while you're typing in this basic terminal interface.
+Type a message and press Enter. Everyone in the channel receives an encrypted `[Wall] Alice joined the chat.` announcement when Alice connects. `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and join announcements appear when you connect. Incoming messages appear above your current draft while you type. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
 
 ## Command reference
 
@@ -384,7 +385,7 @@ Cloudflare Access can provide an additional gate; see its [Access setup guidance
 
 ## Message storage and retention
 
-**Yes, messages are stored.** The default `relay.sqlite3` database is created in the relay's working directory; `noisechat run --database FILE` selects a different path. It keeps encrypted history across server restarts so clients can retrieve messages they missed while offline. There is one database for all channels, not one file per key.
+The relay stores encrypted message history. The default `relay.sqlite3` database is created in the relay's working directory; `noisechat run --database FILE` selects a different path. It keeps encrypted history across server restarts so clients can retrieve messages they missed while offline. There is one database for all channels, not one file per key.
 
 Each row in the `messages` table contains:
 
@@ -409,7 +410,7 @@ The history limits are defined by `RelayStore` defaults in `noisechat/relay.py`;
 
 ### How history appears when you connect
 
-**Yes, retained history displays automatically when you start `noisechat chat`.** A new client session starts its in-memory cursor at `0`, requests the room's retained packets from the relay, decrypts them locally, and prints them in relay sequence order, oldest first. History includes retained join announcements and your own earlier messages. Responses contain at most 100 packets, and chat keeps reading further batches before long-polling for new messages. There is no separate restore command.
+`noisechat chat` automatically displays retained history when you connect. A new client session starts its in-memory cursor at `0`, requests the room's retained packets from the relay, decrypts them locally, and prints them in relay sequence order, oldest first. History includes retained join announcements and your own earlier messages. Responses contain at most 100 packets, and chat keeps reading further batches before long-polling for new messages. There is no separate restore command.
 
 During a temporary connection loss, a still-running client keeps its cursor and resumes after the last packet it received. Closing and reopening the client starts a new session and displays all still-retained history again; no cursor is persisted to disk. Packets already evicted by retention or removed by channel deletion cannot be restored from the relay.
 
@@ -438,7 +439,7 @@ Online status exposes connection counts and presence timing to the relay. Each c
 
 All shared-key holders can read all messages and use any display name. Names are not cryptographic identities. A relay can delay, reorder, omit, or replay messages; client replay suppression is session-local and bounded. This version has no forward secrecy: if the shared key is later compromised, captured old ciphertext can be decrypted. Rotate by creating a new key and distributing it again.
 
-This is an initial implementation built on standard cryptography libraries, not a security-audited messaging protocol. Audio, per-person identities/keys, forward secrecy, persistent replay state, and richer terminal input are future work.
+This is an initial implementation built on standard cryptography libraries, not a security-audited messaging protocol. Audio, per-person identities/keys, forward secrecy, and persistent replay state are future work.
 
 ## Development
 
@@ -447,9 +448,16 @@ python -m unittest discover -s tests -v
 python -m compileall -q noisechat tests
 ```
 
-Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
+Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
-`pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+`pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.2
+
+- Show the minimum length in the first-run server-password prompt.
+- Clear submitted chat input so each message appears only in the relay output; preserve drafts when incoming messages arrive.
+- Clarify retained-message storage and automatic history display.
+- Verify that server-console channel deletion removes all of that channel's messages.
 
 ## v0.4.1
 
