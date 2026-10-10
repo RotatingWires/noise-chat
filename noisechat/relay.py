@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -128,6 +129,8 @@ class RelayServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, address, store: RelayStore):
+        if ":" in address[0]:
+            self.address_family = socket.AF_INET6
         self.store = store
         self.workers = threading.BoundedSemaphore(64)
         self.rate_lock = threading.Lock()
@@ -273,7 +276,8 @@ def serve(host: str, port: int, database: Path) -> None:
     store = RelayStore(database)
     try:
         server = RelayServer((host, port), store)
-        print(f"NoiseChat v{__version__} relay on {host}:{server.server_port}", flush=True)
+        address = f"[{host}]" if ":" in host else host
+        print(f"NoiseChat v{__version__} relay on http://{address}:{server.server_port}", flush=True)
         print("Stores ciphertext only. Press Ctrl+C to stop.", flush=True)
         try:
             server.serve_forever()

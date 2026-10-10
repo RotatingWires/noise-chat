@@ -30,7 +30,7 @@ class Client:
         if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
                 or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}
                 or port == 0):
-            raise NoiseChatError("Use a relay URL such as https://chat.example.com or http://127.0.0.1:8720.")
+            raise NoiseChatError("Use a relay URL such as https://chat.example.com or http://HOST:PORT.")
         self.key = key
         self.url = server.rstrip("/") + "/v1/rooms/" + room_id(key)
         self.opener = build_opener(NoRedirects())

@@ -1,11 +1,30 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.2.0
+# NoiseChat v0.2.1
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
 One shared random key identifies one chat. Give friends a password-encrypted copy on a USB drive. They import it into their device's keyring, then connect to the same relay. No accounts, web interface, or audio in this first version.
+
+## Project stack
+
+- Python 3.11 or newer for the CLI client and relay.
+- Python `argparse` for commands and options.
+- Python `http.server.ThreadingHTTPServer` and `BaseHTTPRequestHandler` for the HTTP backend.
+- Python `urllib.request` for client requests and long polling.
+- SQLite through Python's built-in `sqlite3`, with WAL mode for retained ciphertext.
+- `cryptography` for AES-256-GCM, HKDF, and scrypt.
+- `keyring` for native OS credential storage on clients.
+- `setuptools` and pip for packaging and the installed `noisechat` command.
+
+## Backend
+
+The relay backend lives in `noisechat/relay.py`. It runs on Python's built-in [`http.server.ThreadingHTTPServer`](https://docs.python.org/3/library/http.server.html#http.server.ThreadingHTTPServer), with a custom `BaseHTTPRequestHandler`. It is an HTTP web server exposing a JSON API: clients POST encrypted messages and use long-polling GET requests to receive them. A bounded number of request threads lets clients wait for incoming messages while other requests are handled.
+
+SQLite stores encrypted messages and join announcements across restarts. Online presence is held in memory, refreshed by clients, and removed on departure or expiry. The backend routes packets by their derived room IDs and maintains retention, size, worker, and rate limits. All names and message contents are encrypted on clients; the relay never receives chat keys or decrypts these packets. Native keyrings and encrypted USB key files belong to the clients.
+
+`noisechat run` starts this backend as a foreground process. Its HTTP listener defaults to `http://127.0.0.1:8713`; `--urls` sets the listen IP/host and port. For public HTTPS access, run the HTTP backend behind an HTTPS reverse proxy. Python describes `http.server` as a basic server with limited security checks; NoiseChat adds the bounds described below.
 
 ## Install
 
@@ -32,7 +51,7 @@ On Windows PowerShell, create one with `py -m venv .venv`, then activate it with
 Start the relay in one terminal:
 
 ```sh
-noisechat serve
+noisechat run --urls http://127.0.0.1:8713
 ```
 
 On your client, create the shared key once:
@@ -46,11 +65,11 @@ Choose a strong export passphrase when prompted. The raw key goes into your OS k
 Open two more terminals:
 
 ```sh
-noisechat chat friends --server http://127.0.0.1:8720 --name Alice
+noisechat chat friends --server http://127.0.0.1:8713 --name Alice
 ```
 
 ```sh
-noisechat chat friends --server http://127.0.0.1:8720 --name Bob
+noisechat chat friends --server http://127.0.0.1:8713 --name Bob
 ```
 
 Type a message and press Enter. Everyone in the channel receives an encrypted `[Wall] Alice joined the chat.` announcement when Alice connects. `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and join announcements appear when you connect. Incoming messages print as they arrive, so they may appear while you're typing in this basic terminal interface.
@@ -63,7 +82,7 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 | --- | --- |
 | `noisechat --help` | List the available commands. Use `noisechat COMMAND --help` for its arguments. |
 | `noisechat --version` | Print the installed release version. |
-| `noisechat serve` | Run the HTTP relay; it stores and forwards encrypted messages without holding chat keys. |
+| `noisechat run [--urls HTTP_URL]` | Run the HTTP relay; defaults to `http://127.0.0.1:8713`. Use `--urls` to specify its listen IP/host and port. |
 | `noisechat key --help` | List the key-management subcommands. |
 | `noisechat key create CHAT` | Generate a new shared key and save it in the OS keyring. |
 | `noisechat key import CHAT FILE` | Unlock a password-encrypted key file and save its key in the OS keyring. |
@@ -79,9 +98,8 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 
 | Option | Applies to | What it does |
 | --- | --- | --- |
-| `--host ADDRESS` | `serve` | Bind address; defaults to `127.0.0.1`. Use `0.0.0.0` to accept connections from other machines. |
-| `--port NUMBER` | `serve` | Listening port; defaults to `8720`. `0` asks the OS to choose an available port. |
-| `--database FILE` | `serve` | SQLite ciphertext database; defaults to `relay.sqlite3` in the current directory. |
+| `--urls HTTP_URL` | `run` | One HTTP listen URL with an explicit port; defaults to `http://127.0.0.1:8713`. Use `http://0.0.0.0:8713` for other machines. Port `0` asks the OS to choose an available port. |
+| `--database FILE` | `run` | SQLite ciphertext database; defaults to `relay.sqlite3` in the current directory. |
 | `--export FILE` | `key create` | Also write a password-encrypted copy of the new key. |
 | `--no-store` | `key create` | Save only the encrypted export instead of using the keyring; requires `--export`. |
 | `--replace` | `key import` | Explicitly allow replacing a key already saved under the local chat name. |
@@ -105,8 +123,8 @@ Inside interactive `chat`:
 From another terminal, list every connected chat session in one or more channels:
 
 ```sh
-noisechat users friends --server http://127.0.0.1:8720
-noisechat users friends work --server http://127.0.0.1:8720
+noisechat users friends --server http://127.0.0.1:8713
+noisechat users friends work --server http://127.0.0.1:8713
 ```
 
 The output has `USER` and `CHANNEL` columns. Channel labels are your local key aliases; two people can call the same channel different things. Duplicate aliases for the same shared key are listed once. Multiple connections using the same display name appear as separate sessions.
@@ -147,7 +165,7 @@ If a Linux machine has no desktop keyring, keep only an encrypted key file and u
 
 ```sh
 noisechat key create friends --export friends.noise-key --no-store
-noisechat chat friends --key-file friends.noise-key --server http://127.0.0.1:8720 --name Alice
+noisechat chat friends --key-file friends.noise-key --server http://127.0.0.1:8713 --name Alice
 ```
 
 The passphrase is prompted with input hidden; it is never a command-line argument or environment variable. With `--key-file`, the chat key is kept in process memory and isn't saved in a credential store. Exports are created with mode 0600 on Unix and remain password-encrypted on every OS.
@@ -166,14 +184,14 @@ Removing a local key doesn't revoke anyone else's copy. To remove a person from 
 Send one message, prompted interactively:
 
 ```sh
-noisechat send friends --server http://127.0.0.1:8720 --name Alice
+noisechat send friends --server http://127.0.0.1:8713 --name Alice
 ```
 
 Read one batch and exit, or listen continuously:
 
 ```sh
-noisechat listen friends --server http://127.0.0.1:8720 --once
-noisechat listen friends --server http://127.0.0.1:8720
+noisechat listen friends --server http://127.0.0.1:8713 --once
+noisechat listen friends --server http://127.0.0.1:8713
 ```
 
 `--once` prints a cursor that can be used as `--after NUMBER` on the next invocation. Each batch contains at most 100 messages. Continuous listening and live chat read further batches automatically. A relay acceptance confirms storage, not that a friend read the message.
@@ -192,12 +210,28 @@ noisechat decrypt friends
 For access from other machines on your LAN:
 
 ```sh
-noisechat serve --host 0.0.0.0 --port 8720 --database relay.sqlite3
+noisechat run --urls http://0.0.0.0:8713 --database relay.sqlite3
 ```
 
-Allow the chosen port through your host firewall if needed. For internet hosting, place the relay behind an HTTPS reverse proxy and connect with `https://...`. `/health` returns the release and protocol versions. SQLite retains ciphertext across restarts. Copy the database safely with SQLite's backup tools if needed; an active WAL database cannot be backed up reliably by copying just the main file.
+`0.0.0.0` listens on all IPv4 interfaces. Clients connect using the server's actual LAN IP or hostname, such as `http://192.168.1.50:8713`; `0.0.0.0` is a bind address, not the address to give friends. `127.0.0.1` limits the relay to clients on the same machine. One listen URL is supported per process; it must use `http://` and include a port. IPv6 addresses use brackets, for example `http://[::1]:8713`.
 
-The server runs on Python's built-in [`http.server.ThreadingHTTPServer`](https://docs.python.org/3/library/http.server.html#http.server.ThreadingHTTPServer), with a custom `BaseHTTPRequestHandler`. It is an HTTP web server exposing a JSON API, with no HTML frontend. Clients POST encrypted messages and use long-polling GET requests to receive them; SQLite stores retained ciphertext. No Kestrel, Flask, or additional server framework is involved. Python describes `http.server` as a basic server with limited security checks; this implementation bounds request sizes, worker counts, history, and rates, and uses an HTTPS reverse proxy for public hosting.
+### Change the port
+
+The default port is **8713**. Set a different port in `--urls` when starting the relay:
+
+```sh
+noisechat run --urls http://0.0.0.0:9000
+```
+
+Clients must use the same port in `--server`:
+
+```sh
+noisechat chat friends --server http://192.168.1.50:9000 --name Alice
+```
+
+If you save the relay command in a startup script or service, change `--urls` there to keep your chosen port across restarts. To change the program's built-in default instead, edit `DEFAULT_RELAY_URL` near the top of `noisechat/cli.py`, then reinstall with `python -m pip install .`. There is no separate port configuration file. Running `noisechat run` without `--urls` uses that default.
+
+Allow the chosen port through your host firewall if needed. For internet hosting, place the relay behind an HTTPS reverse proxy and connect with `https://...`. `/health` returns the release and protocol versions. SQLite retains ciphertext across restarts. Copy the database safely with SQLite's backup tools if needed; an active WAL database cannot be backed up reliably by copying just the main file.
 
 The defaults retain at most 500 messages per room and 10,000 messages total across at most 100 active rooms. The oldest retained messages are removed as limits are reached; this is a chat relay, not a permanent archive. SQLite may retain previously allocated disk pages after deletion. No plaintext transcript is written on clients.
 
@@ -240,6 +274,13 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, relay, client, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.2.1
+
+- Add Project stack and Backend sections describing the runtime, dependencies, HTTP API, and storage.
+- Rename the relay command to `run` and set the listen IP/host and port with `--urls`.
+- Change the default listen port to 8713 and update every connection example.
+- Document custom ports, startup/service overrides, the source default, and IPv4/IPv6 listen addresses.
 
 ## v0.2.0
 
