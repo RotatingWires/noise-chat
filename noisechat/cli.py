@@ -118,16 +118,18 @@ def chat_command(args) -> None:
             print(text, flush=True)
 
     receiver = Receiver(client, output)
-    presence = Presence(client, args.name, output)
     stop = threading.Event()
+    presence = Presence(client, args.name, output, stop)
     thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)
     presence.start()
     print(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter. /users lists users; /quit exits.")
     print("Names are chosen by key holders, not verified identities.")
     thread.start()
     try:
-        while True:
+        while not stop.is_set():
             text = input("> ")
+            if stop.is_set():
+                break
             if text == "/quit":
                 break
             if text == "/users":

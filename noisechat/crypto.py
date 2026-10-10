@@ -31,6 +31,12 @@ class NoiseChatError(Exception):
     """An error safe to report without dumping secrets or remote content."""
 
 
+class ChannelDeletedError(NoiseChatError):
+    """The relay operator permanently disabled this room ID."""
+    def __init__(self):
+        super().__init__("Channel deleted by the relay operator. Use a new shared key for a new channel.")
+
+
 def b64encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 

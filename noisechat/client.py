@@ -12,7 +12,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .crypto import (MAX_ENVELOPE_CHARS, MAX_PRESENCE_PER_ROOM, PRESENCE_HEARTBEAT, PRESENCE_TTL,
-                     NoiseChatError, decrypt_message, encrypt_event, encrypt_message, room_id)
+                     ChannelDeletedError, NoiseChatError, decrypt_message, encrypt_event, encrypt_message, room_id)
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -46,6 +46,8 @@ class Client:
         except HTTPError as error:
             status = error.code
             error.close()
+            if status == 410:
+                raise ChannelDeletedError() from None
             raise NoiseChatError(f"Relay returned HTTP {status}.") from None
         except (URLError, TimeoutError, OSError, HTTPException):
             raise NoiseChatError("Could not reach the relay. Check its URL and connection.") from None
@@ -111,10 +113,10 @@ class Client:
 
 class Presence:
     """Refresh one encrypted online session; its private token is never in the roster."""
-    def __init__(self, client: Client, sender: str, output=print):
+    def __init__(self, client: Client, sender: str, output=print, stop: threading.Event | None = None):
         self.client, self.sender, self.output = client, sender, output
         self.token = secrets.token_hex(32)
-        self.stop = threading.Event()
+        self.stop = stop if stop is not None else threading.Event()
         self.thread = threading.Thread(target=self.maintain, daemon=True)
 
     def start(self) -> None:
@@ -129,6 +131,10 @@ class Presence:
                 if offline:
                     self.output("[Online status restored.]")
                 delay, offline = PRESENCE_HEARTBEAT, False
+            except ChannelDeletedError as error:
+                if not self.stop.is_set():
+                    self.stop.set()
+                    self.output(f"[{error} Press Enter to exit.]")
             except NoiseChatError as error:
                 if not offline:
                     self.output(f"[Online status not confirmed: {error} Retrying...]")
@@ -191,6 +197,11 @@ class Receiver:
                 if offline:
                     self.output("[Reconnected to relay.]")
                 offline = False
+            except ChannelDeletedError as error:
+                if not stop.is_set():
+                    stop.set()
+                    self.output(f"[{error} Press Enter to exit.]")
+                return
             except NoiseChatError as error:
                 if stop.is_set():
                     return

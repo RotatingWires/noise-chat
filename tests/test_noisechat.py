@@ -3,6 +3,7 @@ import http.client
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -15,10 +16,10 @@ from urllib.parse import urlsplit
 
 from noisechat import cli
 from noisechat.client import Client, Presence, Receiver, terminal_text
-from noisechat.crypto import (NoiseChatError, b64decode, b64encode, decrypt_key_file,
+from noisechat.crypto import (ChannelDeletedError, NoiseChatError, b64decode, b64encode, decrypt_key_file,
                               decrypt_message, encrypt_event, encrypt_key_file, encrypt_message, generate_key, room_id)
 from noisechat.keys import KeyStore, native_backend, read_key_file, write_key_file
-from noisechat.relay import RelayHandler, RelayStore, RelayServer
+from noisechat.relay import RelayHandler, RelayStore, RelayServer, console
 
 
 class CryptoTests(unittest.TestCase):
@@ -395,6 +396,113 @@ class RelayTests(unittest.TestCase):
             self.assertEqual(cli.main(["chat", "friends", "--server", "http://relay.test", "--name", "Bob"]), 1)
         self.assertEqual(self.alice.users(), [])
 
+    def test_console_deletion_erases_one_channel_and_blocks_it_across_restarts(self):
+        old_packet = encrypt_message(self.key, "Alice", "old message")
+        room = room_id(self.key)
+        self.store.post(room, old_packet)
+        self.alice.connect("a" * 64, "Alice")
+        other = self.client(generate_key())
+        other.send("Bob", "different channel")
+        self.assertEqual(len(self.store.channels()), 2)
+        self.assertEqual(self.store.delete_channel(room), (2, 1))
+        self.assertEqual(len(self.store.channels()), 1)
+        self.assertEqual(self.store.connection.execute("SELECT COUNT(*) FROM messages WHERE room=?", (room,)).fetchone()[0], 0)
+        for operation in [lambda: self.alice.send("Alice", "recreate"), lambda: self.alice.connect("a" * 64, "Alice"),
+                          lambda: self.alice.users(), lambda: self.alice.poll(0, 0)]:
+            with self.assertRaises(ChannelDeletedError):
+                operation()
+        self.assertEqual(decrypt_message(other.key, other.poll(0, 0)[0]["envelope"])["text"], "different channel")
+        self.client(generate_key()).send("Carol", "freed capacity")
+        self.assertEqual(self.store.delete_channel(room), (0, 0))
+        self.store.close()
+        self.store = RelayStore(self.path)
+        self.wire.server.store = self.store
+        with self.assertRaises(ChannelDeletedError):
+            self.alice.send("Alice", "after restart")
+        self.assertEqual(decrypt_message(self.key, old_packet)["text"], "old message", "Deleting a room does not erase anyone's key or captured ciphertext.")
+
+    def test_failed_deletion_keeps_history_and_presence_intact(self):
+        self.alice.connect("a" * 64, "Alice")
+        room = room_id(self.key)
+        self.store.connection.execute("CREATE TRIGGER prevent_delete BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'storage failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.delete_channel(room)
+        self.assertEqual(len(self.bob.poll(0, 0)), 1)
+        self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+        self.assertEqual(self.store.connection.execute("SELECT COUNT(*) FROM deleted_rooms").fetchone()[0], 0)
+
+    def test_server_console_lists_deletes_and_validates_room_id(self):
+        self.alice.connect("a" * 64, "Alice")
+        room = room_id(self.key)
+        stopped = []
+        server = SimpleNamespace(shutdown=lambda: stopped.append(True))
+        output = io.StringIO()
+        commands = ["help", "channels", "delete-channel friends", "delete-channel", "unknown", f"delete-channel {room}", "channels", "quit"]
+        with patch("builtins.input", side_effect=commands), contextlib.redirect_stdout(output):
+            console(self.store, server)
+        text = output.getvalue()
+        self.assertIn(room, text)
+        self.assertNotIn("Alice", text)
+        self.assertIn("64-character room ID", text)
+        self.assertIn("1 packets removed, 1 sessions removed", text)
+        self.assertIn("No active channels", text)
+        self.assertEqual(stopped, [True])
+        with self.assertRaises(ChannelDeletedError):
+            self.bob.poll(0, 0)
+
+    def test_remote_requests_and_client_cli_cannot_delete_channels(self):
+        self.alice.send("Alice", "keep me")
+        room = room_id(self.key)
+        for path in ["/channels", "/delete-channel", f"/v1/rooms/{room}/delete-channel"]:
+            self.assertEqual(self.wire.raw(f"GET {path} HTTP/1.0\r\n\r\n".encode()).status, 404)
+            data = json.dumps({"room": room}).encode()
+            raw = (f"POST {path} HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\n\r\n").encode() + data
+            self.assertEqual(self.wire.raw(raw).status, 404)
+        self.assertEqual(self.wire.raw(f"DELETE /v1/rooms/{room}/messages HTTP/1.0\r\n\r\n".encode()).status, 501)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.main(["delete-channel", room])
+        self.assertEqual(len(self.bob.poll(0, 0)), 1)
+
+    def test_deletion_wakes_waiting_clients_and_stops_receiver_and_presence(self):
+        stop = threading.Event()
+        output = []
+        presence = Presence(self.alice, "Alice", output.append, stop)
+        presence.start()
+        receiver = Receiver(self.bob, output.append)
+        receiver.receive(0)
+        thread = threading.Thread(target=receiver.listen, args=(stop,))
+        thread.start()
+        try:
+            time.sleep(.02)
+            self.store.delete_channel(room_id(self.key))
+            thread.join(timeout=1)
+            self.assertFalse(thread.is_alive(), "Deletion should wake the long poll rather than wait for timeout.")
+            self.assertTrue(stop.is_set())
+            self.assertIn("Channel deleted", "\n".join(output))
+            self.assertNotIn("Retrying", "\n".join(output))
+        finally:
+            stop.set()
+            presence.close()
+            thread.join(timeout=1)
+        self.assertFalse(presence.thread.is_alive())
+        self.assertEqual(self.store.presence, {})
+
+    def test_chat_automatically_displays_retained_history_across_batches(self):
+        self.store.history_per_room = 500
+        self.store.max_messages = 1000
+        for number in range(125):
+            self.alice.send("Alice", f"history{number:03}")
+        output = io.StringIO()
+        def wait_for_history(prompt):
+            deadline = time.monotonic() + 2
+            while "history124" not in output.getvalue() and time.monotonic() < deadline:
+                time.sleep(.005)
+            return "/quit"
+        with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", return_value=self.bob), patch("builtins.input", side_effect=wait_for_history), contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(["chat", "friends", "--server", "http://relay.test", "--name", "Bob"]), 0)
+        history = [line.split("Alice: ", 1)[1] for line in output.getvalue().splitlines() if "Alice: history" in line]
+        self.assertEqual(history, [f"history{number:03}" for number in range(125)])
+
     def test_cli_send_listen_and_live_chat_use_the_same_encrypted_transport(self):
         output=io.StringIO()
         with patch("noisechat.keys.native_backend",return_value=MemoryKeyring()):
@@ -490,6 +598,23 @@ class RelayTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
+    def test_relay_console_runs_only_with_an_attached_terminal(self):
+        for interactive in [True, False]:
+            with self.subTest(interactive=interactive), tempfile.TemporaryDirectory() as directory:
+                stopped = threading.Event()
+                server = SimpleNamespace(server_port=8713, shutdown=stopped.set, server_close=lambda: None,
+                                         serve_forever=lambda: stopped.wait(1) if interactive else None)
+                output = io.StringIO()
+                with patch("noisechat.relay.RelayServer", return_value=server), patch("noisechat.relay.sys.stdin.isatty", return_value=interactive), patch("builtins.input", side_effect=["help", "quit"]) as console_input, contextlib.redirect_stdout(output):
+                    self.assertEqual(cli.main(["run", "--database", str(Path(directory) / "relay.sqlite3")]), 0)
+                if interactive:
+                    self.assertTrue(stopped.is_set())
+                    self.assertEqual(console_input.call_count, 2)
+                    self.assertIn("delete-channel ROOM_ID", output.getvalue())
+                else:
+                    console_input.assert_not_called()
+                    self.assertNotIn("Server console", output.getvalue())
+
     def test_default_and_custom_listen_urls_start_relay_without_client_keys(self):
         with patch("noisechat.relay.serve") as serve, patch("noisechat.cli.KeyStore", side_effect=AssertionError("A relay must not load client keys")):
             self.assertEqual(cli.main(["run"]), 0)

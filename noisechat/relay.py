@@ -5,6 +5,7 @@ import json
 import re
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -13,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
-from .crypto import MAX_PRESENCE_PER_ROOM, PRESENCE_TTL, NoiseChatError, validate_envelope
+from .crypto import MAX_PRESENCE_PER_ROOM, PRESENCE_TTL, ChannelDeletedError, NoiseChatError, validate_envelope
 
 MAX_REQUEST_BYTES = 16384
 MAX_PRESENCE = 1000
@@ -38,14 +39,20 @@ class RelayStore:
                 UNIQUE(room, digest)
             );
             CREATE INDEX IF NOT EXISTS messages_room_sequence ON messages(room, sequence);
+            CREATE TABLE IF NOT EXISTS deleted_rooms (room TEXT PRIMARY KEY);
         """)
+
+    def check_available(self, room: str) -> None:
+        if self.closed:
+            raise NoiseChatError("Relay is shutting down.")
+        if self.connection.execute("SELECT 1 FROM deleted_rooms WHERE room=?", (room,)).fetchone():
+            raise ChannelDeletedError()
 
     def post(self, room: str, envelope: str) -> int:
         validate_envelope(envelope)
         digest = hashlib.sha256(envelope.encode("ascii")).hexdigest()
         with self.condition:
-            if self.closed:
-                raise NoiseChatError("Relay is shutting down.")
+            self.check_available(room)
             existing = self.connection.execute("SELECT sequence FROM messages WHERE room=? AND digest=?", (room, digest)).fetchone()
             if existing:
                 return existing[0]
@@ -81,8 +88,7 @@ class RelayStore:
         validate_envelope(envelope)
         validate_envelope(announcement)
         with self.condition:
-            if self.closed:
-                raise NoiseChatError("Relay is shutting down.")
+            self.check_available(room)
             self.prune_presence()
             session = (room, token)
             joined = session not in self.presence
@@ -97,8 +103,7 @@ class RelayStore:
 
     def users(self, room: str) -> list[str]:
         with self.condition:
-            if self.closed:
-                raise NoiseChatError("Relay is shutting down.")
+            self.check_available(room)
             self.prune_presence()
             return [envelope for (channel, _), (envelope, _) in self.presence.items() if channel == room]
 
@@ -106,10 +111,38 @@ class RelayStore:
         with self.condition:
             self.presence.pop((room, token), None)
 
+    def channels(self) -> list[dict]:
+        with self.condition:
+            if self.closed:
+                raise NoiseChatError("Relay is shutting down.")
+            self.prune_presence()
+            counts = dict(self.connection.execute("SELECT room,COUNT(*) FROM messages GROUP BY room"))
+            online = {}
+            for room, _ in self.presence:
+                online[room] = online.get(room, 0) + 1
+            return [{"room": room, "packets": counts.get(room, 0), "online": online.get(room, 0)}
+                    for room in sorted(counts.keys() | online.keys())]
+
+    def delete_channel(self, room: str) -> tuple[int, int]:
+        if not isinstance(room, str) or not re.fullmatch(r"[0-9a-f]{64}", room):
+            raise NoiseChatError("Use the 64-character room ID, not a local chat name.")
+        with self.condition:
+            if self.closed:
+                raise NoiseChatError("Relay is shutting down.")
+            with self.connection:
+                deleted = self.connection.execute("DELETE FROM messages WHERE room=?", (room,)).rowcount
+                self.connection.execute("INSERT OR IGNORE INTO deleted_rooms(room) VALUES(?)", (room,))
+            sessions = [session for session in self.presence if session[0] == room]
+            for session in sessions:
+                del self.presence[session]
+            self.condition.notify_all()
+            return deleted, len(sessions)
+
     def poll(self, room: str, after: int, wait: float = 0) -> list[dict]:
         deadline = time.monotonic() + wait
         with self.condition:
             while not self.closed:
+                self.check_available(room)
                 rows = self.connection.execute("SELECT sequence,envelope FROM messages WHERE room=? AND sequence>? ORDER BY sequence LIMIT 100", (room, after)).fetchall()
                 if rows or time.monotonic() >= deadline:
                     return [{"sequence": sequence, "envelope": envelope} for sequence, envelope in rows]
@@ -224,6 +257,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                 raise NoiseChatError("Polling wait must be 0–20 seconds.")
             messages = self.server.store.poll(room, after, wait)
             self.respond(200, {"messages": messages})
+        except ChannelDeletedError:
+            self.respond(410, {"error": "Channel deleted."})
         except (NoiseChatError, ValueError):
             self.respond(400, {"error": "Invalid request or unavailable relay."})
         except sqlite3.Error:
@@ -266,10 +301,47 @@ class RelayHandler(BaseHTTPRequestHandler):
                 raise NoiseChatError("Expected one encrypted envelope.")
             sequence = self.server.store.post(room, body["envelope"])
             self.respond(201, {"sequence": sequence})
+        except ChannelDeletedError:
+            self.respond(410, {"error": "Channel deleted."})
         except (NoiseChatError, UnicodeError, ValueError, RecursionError):
             self.respond(400, {"error": "Invalid encrypted message or relay capacity reached."})
         except sqlite3.Error:
             self.respond(503, {"error": "Relay storage unavailable."})
+
+
+def console(store: RelayStore, server: RelayServer) -> None:
+    print("Server console: help, channels, delete-channel ROOM_ID, quit", flush=True)
+    while not store.closed:
+        try:
+            words = input("relay> ").split()
+        except EOFError:
+            return
+        if not words:
+            continue
+        try:
+            if words == ["help"]:
+                print("channels: list room IDs, retained packet counts, and online sessions.")
+                print("delete-channel ROOM_ID: erase that channel's history and permanently block its room ID.")
+                print("quit: stop the relay.")
+            elif words == ["channels"]:
+                channels = store.channels()
+                print(f"{'ROOM ID':<64}  PACKETS  ONLINE")
+                for channel in channels:
+                    print(f"{channel['room']}  {channel['packets']:>7}  {channel['online']:>6}")
+                if not channels:
+                    print("No active channels.")
+            elif len(words) == 2 and words[0] == "delete-channel":
+                packets, sessions = store.delete_channel(words[1])
+                print(f"Channel deleted: {packets} packets removed, {sessions} sessions removed. Room ID permanently blocked.")
+            elif words == ["quit"]:
+                server.shutdown()
+                return
+            else:
+                print("Unknown console command. Type help.")
+        except NoiseChatError as error:
+            print("Error:", error)
+        except sqlite3.Error:
+            print("Error: Relay database could not be updated.")
 
 
 def serve(host: str, port: int, database: Path) -> None:
@@ -279,6 +351,8 @@ def serve(host: str, port: int, database: Path) -> None:
         address = f"[{host}]" if ":" in host else host
         print(f"NoiseChat v{__version__} relay on http://{address}:{server.server_port}", flush=True)
         print("Stores ciphertext only. Press Ctrl+C to stop.", flush=True)
+        if sys.stdin.isatty():
+            threading.Thread(target=console, args=(store, server), daemon=True).start()
         try:
             server.serve_forever()
         except KeyboardInterrupt:

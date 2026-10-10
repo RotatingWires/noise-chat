@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.2.1
+# NoiseChat v0.3.0
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -104,7 +104,7 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 | --- | --- |
 | `noisechat --help` | List the available commands. Use `noisechat COMMAND --help` for its arguments. |
 | `noisechat --version` | Print the installed release version. |
-| `noisechat run [--urls "HTTP_URL"]` | Run the HTTP relay; defaults to `http://127.0.0.1:8713`. Use `--urls` to specify its listen IP/host and port. |
+| `noisechat run [--urls "HTTP_URL"]` | Run the HTTP relay; defaults to `http://127.0.0.1:8713`. Use `--urls` to specify its listen IP/host and port. An attached terminal also provides the server-only console below. |
 | `noisechat key --help` | List the key-management subcommands. |
 | `noisechat key create CHAT` | Generate a new shared key and save it in the OS keyring. |
 | `noisechat key import CHAT FILE` | Unlock a password-encrypted key file and save its key in the OS keyring. |
@@ -139,6 +139,17 @@ Inside interactive `chat`:
 | Any nonblank text | Encrypt and send a message to the channel. |
 | `/users` | Show all connected users in the current channel without sending a chat message. |
 | `/quit` | Leave the roster and exit. Ctrl+C or end-of-input also exits. |
+
+Inside the running relay's **server console** (`relay>`), not a client chat or shell:
+
+| Command | What it does |
+| --- | --- |
+| `help` | Explain the server console commands. |
+| `channels` | List active room IDs, retained packet counts, and online session counts. Local chat names and encrypted usernames are unavailable to the server. |
+| `delete-channel ROOM_ID` | Delete that room's retained history and online presence and persistently block the room ID. Clients cannot recreate it with the old key. |
+| `quit` | Stop the relay. Ctrl+C also stops it. |
+
+The console reads only the relay process's attached terminal. It is disabled without an interactive terminal, such as a background service with no console. There is no HTTP administration endpoint and no `noisechat delete-channel` client command. To administer a service this way, stop it and run the relay interactively with the same `--database` path; issue console commands, then stop the interactive relay and restart the service.
 
 ## Connected users and channels
 
@@ -210,24 +221,19 @@ This removes only the keyring entry under your local alias `friends`. It does no
 
 There is no server-side key to delete. To revoke a person's future access, generate a **new** shared key and give it only to the remaining participants; they move to its new channel. Anyone keeping the old key can still decrypt captured or retained old messages. Losing every copy of a key makes that key's ciphertext unrecoverable.
 
-There is currently **no room-deletion CLI command or remote deletion API**. To erase one room's retained history, the relay operator can delete its rows locally:
+To delete a channel, use the **running server's console**:
 
-1. Before removing your local key, run `noisechat key info friends` and copy the room ID. Use `--key-file FILE` if that is how you keep the key.
-2. Stop the relay so its online roster is cleared and clients cannot write during deletion.
-3. On the server, run `python` to open Python's interactive prompt. Run the following statements, changing the database path if you started the relay with `--database`:
+1. At `relay>`, enter `channels` to find its 64-character room ID. You can also get that ID on a key-holding device with `noisechat key info friends` before removing your local key.
+2. At `relay>`, enter `delete-channel ROOM_ID`, replacing `ROOM_ID` with the full ID, not the local name `friends`.
 
-```python
-import sqlite3
-db = sqlite3.connect("relay.sqlite3")
-room = input("Room ID from key info: ").strip()
-deleted = db.execute("DELETE FROM messages WHERE room = ?", (room,)).rowcount
-db.commit()
-print(f"Deleted {deleted} stored packets.")
-db.close()
-exit()
+```text
+relay> channels
+relay> delete-channel ROOM_ID
 ```
 
-Paste the room ID at the prompt, not the local name `friends`. Other rooms' rows are left intact. This removes retained rows, not copies in backups or friends' terminals, and is not guaranteed secure disk erasure. It does not ban the old key: after restarting the relay, a client with that key can recreate the room by sending another message or joining again.
+Deletion immediately removes that room's retained packets and online sessions and records its room ID in the database's `deleted_rooms` table. Other rooms are left intact. The blocked ID survives relay restarts; sending, joining, reading history, or listing users in that room returns HTTP 410. Connected clients stop listening and refreshing presence; an interactive client waiting for keyboard input exits when you press Enter. Use a new shared key to start a new channel.
+
+This command does not erase local keys, exported key files, backups, or text already displayed in friends' terminals, and does not guarantee secure disk erasure. The old key can still decrypt old ciphertext held elsewhere, but cannot reopen the blocked room on this relay. Deletion applies only to this relay database. There is no remote deletion API or client command for it.
 
 ## One-shot and offline commands
 
@@ -285,6 +291,14 @@ Allow the chosen port through your host firewall if needed. For internet hosting
 
 Requests and responses are size-limited. The server permits at most 64 request handlers and bounds its rate-limit cache. Online presence is limited to 100 sessions per channel and 1,000 total. POSTs, including presence refreshes and departures, use a per-source-IP token bucket (burst 30, refill one request/second). Behind a reverse proxy, clients may share the proxy's source-IP allowance; the relay doesn't trust arbitrary forwarding headers. Routine request logging is disabled so room URLs aren't written into its own access log. Your proxy may still log them.
 
+### Cloudflare Tunnel
+
+A Cloudflare Tunnel can forward a public HTTPS hostname to this relay. If `cloudflared` runs on the same machine, keep the relay bound to `http://127.0.0.1:8713` and point the tunnel's service URL there; clients use the public `https://...` hostname. This keeps the origin listener off the LAN and avoids opening an inbound router port, but the tunnel route still exposes the service through its public hostname.
+
+**A public tunnel alone does not add authentication.** Cloudflare says a published application without an Access application is available to anyone on the Internet. Message contents remain encrypted, but strangers could create channels, fill the room/history limits, evict retained messages, or consume relay capacity. See [Cloudflare's Access setup guidance](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/).
+
+Protect the hostname with Cloudflare Access rather than publishing the open API by itself. For a CLI, Access's [service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/) authenticate requests using `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers with a Service Auth policy. **NoiseChat does not currently supply those headers or perform Cloudflare's browser login**, so Access-protected public-hostname use needs client authentication integration first. Those Access credentials would be separate from the end-to-end chat key; Cloudflare must never receive that key. A private VPN/network is another way to restrict who can reach the relay without publishing an open API.
+
 ## Message storage and retention
 
 **Yes, messages are stored.** The default `relay.sqlite3` database is created in the relay's working directory; `noisechat run --database FILE` selects a different path. It keeps encrypted history across server restarts so clients can retrieve messages they missed while offline. There is one database for all channels, not one file per key.
@@ -298,7 +312,7 @@ Each row in the `messages` table contains:
 | `digest` | A SHA-256 hash of the encrypted envelope, used to suppress duplicate submissions while retained. |
 | `envelope` | The encrypted packet, including its encrypted message/event type, sender, text, message ID, and timestamp. Join announcements are stored here too. |
 
-The database contains no raw chat keys, key-file passphrases, plaintext message bodies, plaintext display names, or local chat aliases. SQLite also keeps its indexes and sequence metadata. Online presence, departure tokens, and the source-IP rate-limit cache are held only in memory; presence expires within 60 seconds of its last accepted refresh, and all presence is cleared on restart. The client does not write a plaintext transcript, although your terminal's scrollback or logging may retain displayed text.
+The database contains no raw chat keys, key-file passphrases, plaintext message bodies, plaintext display names, or local chat aliases. SQLite also keeps its indexes, sequence metadata, and a `deleted_rooms` table containing only blocked room IDs. Online presence, departure tokens, and the source-IP rate-limit cache are held only in memory; presence expires within 60 seconds of its last accepted refresh, and all presence is cleared on restart. The client does not write a plaintext transcript, although your terminal's scrollback or logging may retain displayed text.
 
 History retention is **based on packet counts, not time**:
 
@@ -308,7 +322,15 @@ History retention is **based on packet counts, not time**:
 - New packets cause the oldest retained packets to be removed when a limit is exceeded. Reading a message does not delete it.
 - There is **no age-based expiration**. If a room is quiet and the global limit is not reached, its encrypted history can remain indefinitely, including across restarts.
 
-The history limits are defined by `RelayStore` defaults in `noisechat/relay.py`; there are currently no CLI flags to change them. SQLite can retain previously allocated disk pages after row deletion, so retention is not a promise of secure erasure. The room-history deletion procedure above is separate from removing a local key.
+The history limits are defined by `RelayStore` defaults in `noisechat/relay.py`; there are currently no CLI flags to change them. SQLite can retain previously allocated disk pages after row deletion, so retention is not a promise of secure erasure. Server-console channel deletion is separate from removing a local key. Blocked room IDs do not count toward the active-room limit.
+
+### How history appears when you connect
+
+**Yes, retained history displays automatically when you start `noisechat chat`.** A new client session starts its in-memory cursor at `0`, requests the room's retained packets from the relay, decrypts them locally, and prints them in relay sequence order, oldest first. History includes retained join announcements and your own earlier messages. Responses contain at most 100 packets, and chat keeps reading further batches before long-polling for new messages. There is no separate restore command.
+
+During a temporary connection loss, a still-running client keeps its cursor and resumes after the last packet it received. Closing and reopening the client starts a new session and displays all still-retained history again; no cursor is persisted to disk. Packets already evicted by retention or removed by channel deletion cannot be restored from the relay.
+
+`noisechat listen` also starts from retained history by default. `listen --once` displays only one batch and exits with its cursor; `--after NUMBER` lets you request later batches without replaying earlier ones. `send`, `users`, and the offline encryption commands do not automatically display history.
 
 ## What the encryption does
 
@@ -345,6 +367,14 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, relay, client, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.3.0
+
+- Add server-console channel listing and deletion, without an HTTP administration API or client deletion command.
+- Remove deleted channels' history and presence and persistently block their room IDs.
+- Wake connected receivers and stop clients retrying a deleted channel.
+- Document Cloudflare Tunnel access controls, database contents, and automatic history display.
+- Replace the manual database deletion instructions with the server console command.
 
 ## v0.2.1
 
