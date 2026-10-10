@@ -1,3 +1,6 @@
+> [!WARNING]
+> This project is fully vibecoded, probably inefficient, but it does what I wanted lol
+
 # NoiseChat v0.1.0
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
