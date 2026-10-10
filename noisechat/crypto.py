@@ -19,6 +19,9 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 MAX_TEXT_BYTES = 4096
 MAX_PADDED_BYTES = 8192
 MAX_ENVELOPE_CHARS = 11000
+PRESENCE_TTL = 60
+PRESENCE_HEARTBEAT = 20
+MAX_PRESENCE_PER_ROOM = 100
 PACKET_HEADER = b"NC1"
 KEY_AAD = b"noisechat/key-file/v1"
 KEY_FIELDS = {"format", "version", "kdf", "salt", "nonce", "ciphertext"}
@@ -70,14 +73,18 @@ def validate_sender(sender: str) -> None:
 
 def validate_message(message: object) -> dict:
     fields = {"kind", "id", "sender", "text", "sent_at"}
-    if not isinstance(message, dict) or set(message) != fields or message["kind"] != "text":
+    if not isinstance(message, dict) or set(message) != fields:
         raise NoiseChatError("Unsupported message format.")
     if not all(isinstance(message[field], str) for field in fields):
         raise NoiseChatError("Invalid message fields.")
+    if message["kind"] not in {"text", "join", "presence"}:
+        raise NoiseChatError("Unsupported message format.")
     if not re.fullmatch(r"[0-9a-f]{32}", message["id"]):
         raise NoiseChatError("Invalid message ID.")
     validate_sender(message["sender"])
-    if not message["text"].strip() or len(message["text"].encode("utf-8")) > MAX_TEXT_BYTES:
+    if message["kind"] != "text" and message["text"] != "":
+        raise NoiseChatError("Invalid presence event.")
+    if message["kind"] == "text" and (not message["text"].strip() or len(message["text"].encode("utf-8")) > MAX_TEXT_BYTES):
         raise NoiseChatError("Messages must contain 1–4096 UTF-8 bytes.")
     try:
         date = datetime.fromisoformat(message["sent_at"])
@@ -89,7 +96,17 @@ def validate_message(message: object) -> dict:
 
 
 def encrypt_message(key: bytes, sender: str, text: str) -> str:
-    message = validate_message({"kind": "text", "id": uuid.uuid4().hex,
+    return _encrypt_message(key, sender, text, "text")
+
+
+def encrypt_event(key: bytes, sender: str, kind: str) -> str:
+    if kind not in {"join", "presence"}:
+        raise NoiseChatError("Unsupported presence event.")
+    return _encrypt_message(key, sender, "", kind)
+
+
+def _encrypt_message(key: bytes, sender: str, text: str, kind: str) -> str:
+    message = validate_message({"kind": kind, "id": uuid.uuid4().hex,
                                 "sender": sender, "text": text,
                                 "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     payload = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

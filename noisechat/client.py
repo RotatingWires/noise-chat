@@ -1,6 +1,7 @@
 """Client transport and terminal-safe rendering."""
 
 import json
+import secrets
 import threading
 import unicodedata
 from collections import OrderedDict
@@ -10,7 +11,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .crypto import MAX_ENVELOPE_CHARS, NoiseChatError, decrypt_message, encrypt_message, room_id
+from .crypto import (MAX_ENVELOPE_CHARS, MAX_PRESENCE_PER_ROOM, PRESENCE_HEARTBEAT, PRESENCE_TTL,
+                     NoiseChatError, decrypt_message, encrypt_event, encrypt_message, room_id)
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -30,15 +32,16 @@ class Client:
                 or port == 0):
             raise NoiseChatError("Use a relay URL such as https://chat.example.com or http://127.0.0.1:8720.")
         self.key = key
-        self.url = server.rstrip("/") + "/v1/rooms/" + room_id(key) + "/messages"
+        self.url = server.rstrip("/") + "/v1/rooms/" + room_id(key)
         self.opener = build_opener(NoRedirects())
 
-    def request(self, method: str, query: dict | None = None, body: dict | None = None) -> dict:
-        url = self.url + ("?" + urlencode(query) if query else "")
+    def request(self, method: str, query: dict | None = None, body: dict | None = None,
+                resource: str = "messages", timeout: int = 25) -> dict:
+        url = self.url + "/" + resource + ("?" + urlencode(query) if query else "")
         data = json.dumps(body).encode() if body is not None else None
         request = Request(url, data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json"})
         try:
-            with self.opener.open(request, timeout=25) as response:
+            with self.opener.open(request, timeout=timeout) as response:
                 raw = response.read(1200001)
         except HTTPError as error:
             status = error.code
@@ -77,6 +80,69 @@ class Client:
             last = message["sequence"]
         return messages
 
+    def connect(self, token: str, sender: str) -> None:
+        body = {"token": token, "envelope": encrypt_event(self.key, sender, "presence"),
+                "announcement": encrypt_event(self.key, sender, "join")}
+        value = self.request("POST", body=body, resource="presence", timeout=5)
+        if type(value.get("joined")) is not bool:
+            raise NoiseChatError("Relay returned an invalid presence receipt.")
+
+    def disconnect(self, token: str) -> None:
+        value = self.request("POST", body={"token": token}, resource="presence", timeout=5)
+        if value.get("left") is not True:
+            raise NoiseChatError("Relay returned an invalid departure receipt.")
+
+    def users(self) -> list[dict]:
+        value = self.request("GET", resource="presence", timeout=5)
+        entries = value.get("users")
+        if (not isinstance(entries, list) or len(entries) > MAX_PRESENCE_PER_ROOM
+                or any(not isinstance(entry, str) or len(entry) > MAX_ENVELOPE_CHARS for entry in entries)):
+            raise NoiseChatError("Relay returned an invalid user list.")
+        users = {}
+        for entry in entries:
+            try:
+                message = decrypt_message(self.key, entry)
+            except NoiseChatError:
+                continue
+            if message["kind"] == "presence":
+                users[message["id"]] = message
+        return sorted(users.values(), key=lambda user: (user["sender"].casefold(), user["id"]))
+
+
+class Presence:
+    """Refresh one encrypted online session; its private token is never in the roster."""
+    def __init__(self, client: Client, sender: str, output=print):
+        self.client, self.sender, self.output = client, sender, output
+        self.token = secrets.token_hex(32)
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.maintain, daemon=True)
+
+    def start(self) -> None:
+        self.client.connect(self.token, self.sender)
+        self.thread.start()
+
+    def maintain(self) -> None:
+        delay, offline = PRESENCE_HEARTBEAT, False
+        while not self.stop.wait(delay):
+            try:
+                self.client.connect(self.token, self.sender)
+                if offline:
+                    self.output("[Online status restored.]")
+                delay, offline = PRESENCE_HEARTBEAT, False
+            except NoiseChatError as error:
+                if not offline:
+                    self.output(f"[Online status not confirmed: {error} Retrying...]")
+                delay, offline = 5, True
+
+    def close(self) -> None:
+        self.stop.set()
+        # Heartbeats use a five-second request timeout. Finish one before leaving.
+        self.thread.join()
+        try:
+            self.client.disconnect(self.token)
+        except NoiseChatError:
+            self.output(f"[Could not confirm departure; online status expires within {PRESENCE_TTL} seconds.]")
+
 
 def terminal_text(value: str) -> str:
     # Remote text cannot inject ANSI escapes, carriage returns, or bidi controls.
@@ -85,6 +151,8 @@ def terminal_text(value: str) -> str:
 
 def render_message(message: dict) -> str:
     timestamp = datetime.fromisoformat(message["sent_at"]).astimezone().strftime("%H:%M")
+    if message["kind"] == "join":
+        return f"[{timestamp}] [Wall] {terminal_text(message['sender'])} joined the chat."
     return f"[{timestamp}] {terminal_text(message['sender'])}: {terminal_text(message['text'])}"
 
 
@@ -105,6 +173,8 @@ class Receiver:
                 self.output("[Ignored a message that could not be authenticated.]")
                 continue
             if message["id"] in self.seen:
+                continue
+            if message["kind"] == "presence":
                 continue
             self.seen[message["id"]] = None
             while len(self.seen) > 10000:

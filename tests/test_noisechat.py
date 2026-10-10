@@ -14,9 +14,9 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
 from noisechat import cli
-from noisechat.client import Client, Receiver, terminal_text
+from noisechat.client import Client, Presence, Receiver, terminal_text
 from noisechat.crypto import (NoiseChatError, b64decode, b64encode, decrypt_key_file,
-                              decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id)
+                              decrypt_message, encrypt_event, encrypt_key_file, encrypt_message, generate_key, room_id)
 from noisechat.keys import KeyStore, native_backend, read_key_file, write_key_file
 from noisechat.relay import RelayHandler, RelayStore, RelayServer
 
@@ -232,6 +232,169 @@ class RelayTests(unittest.TestCase):
         other = self.client(generate_key())
         self.assertEqual(other.poll(0, wait=0), [])
 
+    def test_join_wall_and_roster_are_encrypted_and_channel_scoped(self):
+        token = "a" * 64
+        self.alice.connect(token, "Alice")
+        self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+        self.assertEqual(self.client(generate_key()).users(), [])
+        output = []
+        receiver = Receiver(self.bob, output.append)
+        self.assertEqual(receiver.receive(0), 1)
+        self.assertIn("[Wall] Alice joined the chat.", output[0])
+        self.alice.connect(token, "Alice")
+        self.assertEqual(receiver.receive(0), 0, "A refresh must not broadcast another join.")
+        self.assertEqual(len(self.bob.users()), 1)
+        wire = b"".join(self.wire.requests)
+        self.assertNotIn(b"Alice", wire)
+        self.assertNotIn(self.key, wire)
+        self.assertNotIn(b"joined the chat", wire)
+        response = self.wire.raw(f"GET /v1/rooms/{room_id(self.key)}/presence HTTP/1.0\r\n\r\n".encode()).read()
+        self.assertNotIn(token.encode(), response)
+        self.store.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.assertNotIn(b"Alice", self.path.read_bytes())
+        self.assertNotIn(token.encode(), self.path.read_bytes())
+        self.alice.disconnect(token)
+        self.assertEqual(self.bob.users(), [])
+        self.assertEqual(receiver.receive(0), 0)
+
+    def test_refresh_expiry_and_rejoin_after_relay_restart(self):
+        with patch("noisechat.relay.time.monotonic", return_value=100):
+            self.alice.connect("a" * 64, "Alice")
+            self.bob.connect("b" * 64, "Bob")
+        with patch("noisechat.relay.time.monotonic", return_value=140):
+            self.alice.connect("a" * 64, "Alice")
+        with patch("noisechat.relay.time.monotonic", return_value=160):
+            self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+        with patch("noisechat.relay.time.monotonic", return_value=200):
+            self.assertEqual(self.bob.users(), [])
+            self.alice.connect("a" * 64, "Alice")
+            self.assertEqual(len(self.bob.poll(0, 0)), 3, "An expired session announces its new join.")
+        self.store.close()
+        self.store = RelayStore(self.path)
+        self.wire.server.store = self.store
+        self.assertEqual(self.bob.users(), [], "Restart must not restore stale online sessions.")
+        self.alice.connect("a" * 64, "Alice")
+        self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+
+    def test_same_name_sessions_and_private_departure_tokens(self):
+        self.alice.connect("a" * 64, "Alice")
+        self.bob.connect("b" * 64, "Alice")
+        self.assertEqual(len(self.bob.users()), 2)
+        self.bob.disconnect("c" * 64)
+        self.assertEqual(len(self.bob.users()), 2)
+        self.bob.disconnect("b" * 64)
+        self.assertEqual(len(self.bob.users()), 1)
+        other = self.client(generate_key())
+        other.disconnect("a" * 64)
+        self.assertEqual(len(self.bob.users()), 1, "A different channel cannot remove this session.")
+
+    def test_presence_limits_and_failed_join_do_not_leave_ghost_users(self):
+        with patch("noisechat.relay.MAX_PRESENCE_PER_ROOM", 1):
+            self.alice.connect("a" * 64, "Alice")
+            with self.assertRaises(NoiseChatError):
+                self.bob.connect("b" * 64, "Bob")
+            self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+            self.alice.connect("a" * 64, "Alice")
+            self.alice.disconnect("a" * 64)
+            self.bob.connect("b" * 64, "Bob")
+        with patch("noisechat.relay.MAX_PRESENCE", 1):
+            with self.assertRaises(NoiseChatError):
+                self.client(generate_key()).connect("c" * 64, "Carol")
+        self.client(generate_key()).send("Elsewhere", "fill room capacity")
+        with self.assertRaises(NoiseChatError):
+            self.client(generate_key()).connect("d" * 64, "Dave")
+        self.assertEqual(len(self.store.presence), 1)
+
+    def test_presence_http_validation_and_untrusted_roster_entries(self):
+        room = room_id(self.key)
+        post = f"POST /v1/rooms/{room}/presence HTTP/1.0\r\nContent-Type: application/json\r\n"
+        for body in [{}, {"token": []}, {"token": "short"}, {"token": "a" * 64, "envelope": "plaintext"},
+                     {"token": "a" * 64, "envelope": "bad", "announcement": "bad"}]:
+            data = json.dumps(body).encode()
+            response = self.wire.raw((post + f"Content-Length: {len(data)}\r\n\r\n").encode() + data)
+            self.assertEqual(response.status, 400)
+        self.assertEqual(self.wire.raw(f"GET /v1/rooms/{room}/presence?after=0 HTTP/1.0\r\n\r\n".encode()).status, 400)
+        self.alice.connect("a" * 64, "Alice")
+        self.store.connect(room, "b" * 64, encrypt_event(generate_key(), "Fake", "presence"),
+                           encrypt_event(generate_key(), "Fake", "join"))
+        self.store.connect(room, "c" * 64, encrypt_message(self.key, "Fake", "not presence"),
+                           encrypt_event(self.key, "Fake", "join"))
+        self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+
+    def test_users_cli_multiple_channels_and_chat_users_leave(self):
+        second_key = generate_key()
+        other = self.client(second_key)
+        self.alice.connect("a" * 64, "Alice")
+        other.connect("c" * 64, "Carol")
+        output = io.StringIO()
+        with patch("noisechat.keys.native_backend", return_value=MemoryKeyring()):
+            KeyStore().put("friends", self.key)
+            KeyStore().put("same-room", self.key)
+            KeyStore().put("work", second_key)
+            def client_for(server, key):
+                return self.client(key)
+            with patch("noisechat.cli.Client", side_effect=client_for), contextlib.redirect_stdout(output):
+                self.assertEqual(cli.main(["users", "friends", "same-room", "work", "--server", "http://relay.test"]), 0)
+            lines = output.getvalue().splitlines()
+            self.assertIn("USER", lines[0])
+            self.assertIn("CHANNEL", lines[0])
+            self.assertEqual(len(lines), 3)
+            self.assertRegex(lines[1], r"Alice\s+friends$")
+            self.assertRegex(lines[2], r"Carol\s+work$")
+            self.assertEqual(len(self.store.presence), 2, "Listing users must not itself join a channel.")
+            output = io.StringIO()
+            def chat_input(prompt):
+                users = self.alice.users()
+                self.assertEqual([user["sender"] for user in users], ["Alice", "Bob"])
+                return next(chat_input.commands)
+            chat_input.commands = iter(["/users", "/quit"])
+            with patch("noisechat.cli.Client", return_value=self.bob), contextlib.redirect_stdout(output), patch("builtins.input", side_effect=chat_input):
+                self.assertEqual(cli.main(["chat", "friends", "--server", "http://relay.test", "--name", "Bob"]), 0)
+            self.assertRegex(output.getvalue(), r"Bob\s+friends")
+            self.assertEqual([user["sender"] for user in self.alice.users()], ["Alice"])
+            messages = [decrypt_message(self.key, record["envelope"]) for record in self.alice.poll(0, 0)]
+            self.assertNotIn("/users", [message["text"] for message in messages])
+            self.assertNotIn("/quit", [message["text"] for message in messages])
+
+    def test_users_cli_key_file_empty_roster_and_failed_departure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "friends.noise-key"
+            write_key_file(path, encrypt_key_file(self.key, "four random words here"))
+            self.alice.connect("a" * 64, "Alice")
+            output = io.StringIO()
+            with patch("noisechat.cli.Client", return_value=self.bob), patch("noisechat.cli.getpass.getpass", return_value="four random words here"), contextlib.redirect_stdout(output):
+                self.assertEqual(cli.main(["users", "friends", "--key-file", str(path), "--server", "http://relay.test"]), 0)
+            self.assertRegex(output.getvalue(), r"Alice\s+friends")
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(cli.main(["users", "friends", "work", "--key-file", str(path), "--server", "http://relay.test"]), 1)
+            self.assertIn("one channel", errors.getvalue())
+        presence = Presence(self.alice, "Alice", lambda text: None)
+        presence.start()
+        with patch.object(self.alice, "disconnect", side_effect=NoiseChatError("offline")):
+            presence.close()
+        self.assertFalse(presence.thread.is_alive())
+        with patch("noisechat.relay.time.monotonic", return_value=time.monotonic() + 60):
+            output = io.StringIO()
+            with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", return_value=self.bob), contextlib.redirect_stdout(output):
+                self.assertEqual(cli.main(["users", "friends", "--server", "http://relay.test"]), 0)
+            self.assertIn("No connected users", output.getvalue())
+
+    def test_presence_background_refresh_and_departure_after_input_failure(self):
+        output = []
+        presence = Presence(self.alice, "Alice", output.append)
+        with patch("noisechat.client.PRESENCE_HEARTBEAT", .01):
+            presence.start()
+            deadline = time.monotonic() + 1
+            while len(self.wire.requests) < 2 and time.monotonic() < deadline:
+                time.sleep(.005)
+            presence.close()
+        self.assertGreaterEqual(len(self.wire.requests), 3)
+        self.assertEqual(self.bob.users(), [])
+        self.assertEqual(len(self.bob.poll(0, 0)), 1, "Heartbeats must not fill message history.")
+        with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", return_value=self.bob), patch("builtins.input", side_effect=OSError("input failed")), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["chat", "friends", "--server", "http://relay.test", "--name", "Bob"]), 1)
+        self.assertEqual(self.alice.users(), [])
+
     def test_cli_send_listen_and_live_chat_use_the_same_encrypted_transport(self):
         output=io.StringIO()
         with patch("noisechat.keys.native_backend",return_value=MemoryKeyring()):
@@ -327,6 +490,21 @@ class RelayTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_roster_validation_replay_suppression_and_terminal_escaping(self):
+        key = generate_key()
+        client = Client("http://relay.test", key)
+        valid = encrypt_event(key, "Alice\x1b[2J", "presence")
+        wrong_key = encrypt_event(generate_key(), "Fake", "presence")
+        with patch.object(client, "request", return_value={"users": [valid, valid, wrong_key, "bad"]}):
+            self.assertEqual(len(client.users()), 1)
+            output = []
+            cli.print_users([("friends", client)], output.append)
+        self.assertNotIn("\x1b", "\n".join(output))
+        self.assertIn("\\u001b", "\n".join(output))
+        for value in [{"users": False}, {"users": [None]}, {"users": [valid] * 101}, {"users": ["a" * 11001]}]:
+            with patch.object(client, "request", return_value=value), self.assertRaises(NoiseChatError):
+                client.users()
+
     def test_transport_errors_are_reported_without_response_content(self):
         client=Client("http://relay.test",generate_key())
         with patch.object(client.opener,"open",side_effect=http.client.BadStatusLine("untrusted response text")):

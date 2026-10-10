@@ -9,7 +9,7 @@ import warnings
 from pathlib import Path
 
 from . import __version__
-from .client import Client, Receiver, terminal_text
+from .client import Client, Presence, Receiver, terminal_text
 from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
 
@@ -101,9 +101,11 @@ def chat_command(args) -> None:
             print(text, flush=True)
 
     receiver = Receiver(client, output)
+    presence = Presence(client, args.name, output)
     stop = threading.Event()
     thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)
-    print(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter. /quit exits.")
+    presence.start()
+    print(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter. /users lists users; /quit exits.")
     print("Names are chosen by key holders, not verified identities.")
     thread.start()
     try:
@@ -111,6 +113,12 @@ def chat_command(args) -> None:
             text = input("> ")
             if text == "/quit":
                 break
+            if text == "/users":
+                try:
+                    print_users([(args.chat, client)], output)
+                except NoiseChatError as error:
+                    output(f"[Could not list users: {error}]")
+                continue
             if not text.strip():
                 continue
             try:
@@ -121,8 +129,36 @@ def chat_command(args) -> None:
         pass
     finally:
         stop.set()
+        presence.close()
         # A receiver may be in a bounded long poll; it doesn't block CLI exit.
         thread.join(timeout=0.2)
+
+
+def print_users(channels, output=print) -> None:
+    rows = [(user["sender"], channel) for channel, client in channels for user in client.users()]
+    if not rows:
+        output("No connected users in the requested channels.")
+        return
+    rows = [(terminal_text(name), terminal_text(channel)) for name, channel in rows]
+    width = max(len("USER"), *(len(name) for name, _ in rows))
+    output(f"{'USER':<{width}}  CHANNEL")
+    for name, channel in rows:
+        output(f"{name:<{width}}  {channel}")
+
+
+def users_command(args) -> None:
+    if args.key_file and len(args.chats) != 1:
+        raise NoiseChatError("--key-file supports one channel at a time.")
+    channels = []
+    seen = set()
+    for channel in args.chats:
+        args.chat = channel
+        key = load_key(args)
+        identity = room_id(key)
+        if identity not in seen:
+            channels.append((channel, Client(args.server, key)))
+            seen.add(identity)
+    print_users(channels)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -152,6 +188,11 @@ def parser() -> argparse.ArgumentParser:
     info = actions.add_parser("info", help="show the room ID, never the secret key")
     info.add_argument("chat")
     info.add_argument("--key-file", type=Path)
+
+    users = commands.add_parser("users", help="list connected users and their channels (requires each channel's key)")
+    users.add_argument("chats", nargs="+", metavar="CHAT", help="local names of channels to list")
+    users.add_argument("--server", required=True, help="relay URL, including http:// or https://")
+    users.add_argument("--key-file", type=Path, help="unlock an encrypted key file for a single channel")
 
     for name, help_text in [("chat", "send and receive interactively"), ("send", "send one message"),
                             ("listen", "receive messages"), ("encrypt", "turn text into ciphertext offline"),
@@ -184,6 +225,8 @@ def main(argv=None) -> int:
             key_command(args)
         elif args.command == "chat":
             chat_command(args)
+        elif args.command == "users":
+            users_command(args)
         else:
             key = load_key(args)
             if args.command in {"send", "encrypt"}:
