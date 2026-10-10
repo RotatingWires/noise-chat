@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.2
+# NoiseChat v0.4.3
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -451,6 +451,10 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.3
+
+- Simplify the invalid server-password input error to `Password incorrect`.
 
 ## v0.4.2
 

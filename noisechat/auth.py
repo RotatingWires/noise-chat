@@ -32,7 +32,7 @@ def password_bytes(password: str) -> bytes:
         raise NoiseChatError("Server password must be text.")
     value = password.encode("utf-8")
     if not value or len(value) > MAX_PASSWORD_BYTES or any(char in password for char in "\r\n\x00"):
-        raise NoiseChatError("Server passwords must be nonempty, single-line text of at most 1024 UTF-8 bytes.")
+        raise NoiseChatError("Password incorrect")
     return value
 
 
