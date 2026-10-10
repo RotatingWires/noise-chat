@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.1.0
+# NoiseChat v0.2.0
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -53,7 +53,69 @@ noisechat chat friends --server http://127.0.0.1:8720 --name Alice
 noisechat chat friends --server http://127.0.0.1:8720 --name Bob
 ```
 
-Type a message and press Enter. `/quit` or Ctrl+C exits. Existing retained messages appear when you connect. Incoming messages print as they arrive, so they may appear while you're typing in this basic terminal interface.
+Type a message and press Enter. Everyone in the channel receives an encrypted `[Wall] Alice joined the chat.` announcement when Alice connects. `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and join announcements appear when you connect. Incoming messages print as they arrive, so they may appear while you're typing in this basic terminal interface.
+
+## Command reference
+
+`CHAT` is your local name for a shared key, such as `friends`. `SERVER` is the relay URL, including `http://` or `https://`. Every command and key subcommand accepts `-h` or `--help`.
+
+| Command | What it does |
+| --- | --- |
+| `noisechat --help` | List the available commands. Use `noisechat COMMAND --help` for its arguments. |
+| `noisechat --version` | Print the installed release version. |
+| `noisechat serve` | Run the HTTP relay; it stores and forwards encrypted messages without holding chat keys. |
+| `noisechat key --help` | List the key-management subcommands. |
+| `noisechat key create CHAT` | Generate a new shared key and save it in the OS keyring. |
+| `noisechat key import CHAT FILE` | Unlock a password-encrypted key file and save its key in the OS keyring. |
+| `noisechat key export CHAT FILE` | Write a password-encrypted copy of an existing key for USB distribution or backup. |
+| `noisechat key info CHAT` | Show the derived room ID so friends can compare keys, without printing the secret key. |
+| `noisechat key remove CHAT` | Delete your local keyring entry; other people's copies and exported files still work. |
+| `noisechat chat CHAT --server SERVER --name NAME` | Join a channel, announce your arrival, and send and receive interactively. Keeps your online status refreshed while running. |
+| `noisechat users CHAT [CHAT ...] --server SERVER` | List all connected chat sessions and their channels for one or more shared keys you hold. |
+| `noisechat send CHAT --server SERVER --name NAME` | Prompt for one message, encrypt and send it, then exit. Does not join the online roster. |
+| `noisechat listen CHAT --server SERVER` | Read retained messages and keep listening. This is an unnamed, receive-only command; it does not join the online roster. |
+| `noisechat encrypt CHAT --name NAME` | Prompt for text and print copyable ciphertext without contacting a server. |
+| `noisechat decrypt CHAT` | Prompt for ciphertext and decrypt it locally without contacting a server. |
+
+| Option | Applies to | What it does |
+| --- | --- | --- |
+| `--host ADDRESS` | `serve` | Bind address; defaults to `127.0.0.1`. Use `0.0.0.0` to accept connections from other machines. |
+| `--port NUMBER` | `serve` | Listening port; defaults to `8720`. `0` asks the OS to choose an available port. |
+| `--database FILE` | `serve` | SQLite ciphertext database; defaults to `relay.sqlite3` in the current directory. |
+| `--export FILE` | `key create` | Also write a password-encrypted copy of the new key. |
+| `--no-store` | `key create` | Save only the encrypted export instead of using the keyring; requires `--export`. |
+| `--replace` | `key import` | Explicitly allow replacing a key already saved under the local chat name. |
+| `--key-file FILE` | `key info`, `chat`, `users`, `send`, `listen`, `encrypt`, `decrypt` | Unlock an encrypted file instead of reading the keyring. For `users`, this supports one channel per invocation. |
+| `--server URL` | `chat`, `users`, `send`, `listen` | Required relay URL. |
+| `--name NAME` | `chat`, `send`, `encrypt` | Required display name, encrypted before transmission. |
+| `--stdin` | `send`, `encrypt` | Read UTF-8 message text from standard input instead of prompting. |
+| `--once` | `listen` | Read one batch immediately, print its cursor, and exit. |
+| `--after NUMBER` | `listen` | Start after a previous relay cursor; defaults to `0` for retained history. |
+
+Inside interactive `chat`:
+
+| Input | What it does |
+| --- | --- |
+| Any nonblank text | Encrypt and send a message to the channel. |
+| `/users` | Show all connected users in the current channel without sending a chat message. |
+| `/quit` | Leave the roster and exit. Ctrl+C or end-of-input also exits. |
+
+## Connected users and channels
+
+From another terminal, list every connected chat session in one or more channels:
+
+```sh
+noisechat users friends --server http://127.0.0.1:8720
+noisechat users friends work --server http://127.0.0.1:8720
+```
+
+The output has `USER` and `CHANNEL` columns. Channel labels are your local key aliases; two people can call the same channel different things. Duplicate aliases for the same shared key are listed once. Multiple connections using the same display name appear as separate sessions.
+
+Usernames and join announcements remain encrypted. You need each channel's key to identify its connected users; there is no public server-wide directory of plaintext names or channels. `users` itself does not join or announce a new user. Invalid encrypted roster entries are ignored.
+
+Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately; after a crash or lost connection it expires within 60 seconds of the last accepted refresh. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join notices are retained like chat messages, so use `users` for current online status.
+
+Upgrade both the relay and clients to v0.2.0 for presence and join announcements. Older clients can still exchange text messages, but cannot interpret the new encrypted event types.
 
 ## Give a friend access
 
@@ -135,9 +197,11 @@ noisechat serve --host 0.0.0.0 --port 8720 --database relay.sqlite3
 
 Allow the chosen port through your host firewall if needed. For internet hosting, place the relay behind an HTTPS reverse proxy and connect with `https://...`. `/health` returns the release and protocol versions. SQLite retains ciphertext across restarts. Copy the database safely with SQLite's backup tools if needed; an active WAL database cannot be backed up reliably by copying just the main file.
 
+The server runs on Python's built-in [`http.server.ThreadingHTTPServer`](https://docs.python.org/3/library/http.server.html#http.server.ThreadingHTTPServer), with a custom `BaseHTTPRequestHandler`. It is an HTTP web server exposing a JSON API, with no HTML frontend. Clients POST encrypted messages and use long-polling GET requests to receive them; SQLite stores retained ciphertext. No Kestrel, Flask, or additional server framework is involved. Python describes `http.server` as a basic server with limited security checks; this implementation bounds request sizes, worker counts, history, and rates, and uses an HTTPS reverse proxy for public hosting.
+
 The defaults retain at most 500 messages per room and 10,000 messages total across at most 100 active rooms. The oldest retained messages are removed as limits are reached; this is a chat relay, not a permanent archive. SQLite may retain previously allocated disk pages after deletion. No plaintext transcript is written on clients.
 
-Requests and responses are size-limited. The server permits at most 64 request handlers and bounds its rate-limit cache. POSTs use a per-source-IP token bucket (burst 30, refill one message/second). Behind a reverse proxy, clients may share the proxy's source-IP allowance; the relay doesn't trust arbitrary forwarding headers. Routine request logging is disabled so room URLs aren't written into its own access log. Your proxy may still log them.
+Requests and responses are size-limited. The server permits at most 64 request handlers and bounds its rate-limit cache. Online presence is limited to 100 sessions per channel and 1,000 total. POSTs, including presence refreshes and departures, use a per-source-IP token bucket (burst 30, refill one request/second). Behind a reverse proxy, clients may share the proxy's source-IP allowance; the relay doesn't trust arbitrary forwarding headers. Routine request logging is disabled so room URLs aren't written into its own access log. Your proxy may still log them.
 
 ## What the encryption does
 
@@ -146,7 +210,7 @@ This is symmetric, client-side end-to-end encryption using established primitive
 - A cryptographically random 256-bit shared chat key.
 - AES-256-GCM authenticated encryption from `cryptography`, with a fresh random 32-byte salt, an HKDF-derived message key, and a fresh 12-byte nonce for each message.
 - Authentication binds each encrypted packet to its derived room ID and protocol version. Changed ciphertext and wrong keys are rejected.
-- Display names, message IDs, timestamps, and text are encrypted together. UTF-8 message text is limited to 4096 bytes.
+- Display names, message/event types, IDs, timestamps, and text are encrypted together. UTF-8 message text is limited to 4096 bytes. Presence and join announcements use the same authenticated encryption.
 - Random padding rounds the encrypted plaintext to 256-byte buckets. It obscures small length differences, not all message lengths.
 - USB exports use AES-256-GCM with a passphrase-derived scrypt key (N=131072, r=8, p=1), fresh salt, and a fresh nonce. Import parameters and sizes are fixed and validated.
 - Repeated packet submissions are deduplicated by the relay while retained. Clients also suppress repeated authenticated message IDs within a bounded, in-memory session cache.
@@ -157,6 +221,8 @@ Sending the same plaintext twice produces different ciphertext. Base64 merely ma
 ## What it does not protect
 
 HTTP still hides message contents from someone who lacks the key, but exposes room IDs, IP addresses, approximate sizes, timing, and traffic patterns. HTTP observers can also disrupt traffic or submit junk/replay packets. HTTPS protects the transport and authenticates the server, so use it when hosting publicly.
+
+Online status exposes connection counts and presence timing to the relay. Each chat session uses a random private token to refresh or remove its presence; that token is sent over the transport but is never in the public roster or SQLite database. HTTP observers can capture it, so use HTTPS to protect presence updates too. The roster is a relay-reported view, not proof of a person's identity or guaranteed connectivity; a relay or key holder can replay or fabricate presence.
 
 Room IDs are unguessable routing capabilities derived from the random key, but the relay has no separate accounts or access-control system. Anyone who learns a room ID can retrieve its ciphertext or submit packets. Clients reject forged contents without the key; that doesn't prevent bandwidth/storage abuse or denial of service.
 
@@ -171,9 +237,17 @@ python -m unittest discover -s tests -v
 python -m compileall -q noisechat tests
 ```
 
-Tests cover randomized encryption, Unicode, authentication failures, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted wire/database contents, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
+Tests cover randomized encryption, Unicode, authentication failures, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, relay, client, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.2.0
+
+- Document every command, option, and interactive chat command.
+- Explain the built-in Python HTTP server and JSON relay API.
+- Broadcast encrypted wall announcements when a chat session joins or reconnects after expiry.
+- Add `users` for connected users across specified channels and `/users` inside chat.
+- Keep usernames encrypted; expire abandoned sessions and remove presence on normal exit.
 
 ## v0.1.0
 

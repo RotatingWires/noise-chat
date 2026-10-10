@@ -12,16 +12,18 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
-from .crypto import NoiseChatError, validate_envelope
+from .crypto import MAX_PRESENCE_PER_ROOM, PRESENCE_TTL, NoiseChatError, validate_envelope
 
 MAX_REQUEST_BYTES = 16384
-ROOM_PATH = re.compile(r"/v1/rooms/([0-9a-f]{64})/messages")
+MAX_PRESENCE = 1000
+ROOM_PATH = re.compile(r"/v1/rooms/([0-9a-f]{64})/(messages|presence)")
 
 
 class RelayStore:
     def __init__(self, database: Path, history_per_room: int = 500, max_messages: int = 10000, max_rooms: int = 100):
         self.condition = threading.Condition(threading.RLock())
         self.closed = False
+        self.presence = {}
         self.history_per_room, self.max_messages, self.max_rooms = history_per_room, max_messages, max_rooms
         self.connection = sqlite3.connect(database, check_same_thread=False)
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -46,9 +48,7 @@ class RelayStore:
             existing = self.connection.execute("SELECT sequence FROM messages WHERE room=? AND digest=?", (room, digest)).fetchone()
             if existing:
                 return existing[0]
-            known_room = self.connection.execute("SELECT 1 FROM messages WHERE room=? LIMIT 1", (room,)).fetchone()
-            if not known_room and self.connection.execute("SELECT COUNT(DISTINCT room) FROM messages").fetchone()[0] >= self.max_rooms:
-                raise NoiseChatError("Relay room capacity reached.")
+            self.check_room_capacity(room)
             with self.connection:
                 cursor = self.connection.execute("INSERT INTO messages(room,digest,envelope) VALUES(?,?,?)", (room, digest, envelope))
                 sequence = cursor.lastrowid
@@ -59,6 +59,51 @@ class RelayStore:
                     (SELECT sequence FROM messages ORDER BY sequence DESC LIMIT ?)""", (self.max_messages,))
             self.condition.notify_all()
             return sequence
+
+    def prune_presence(self) -> None:
+        now = time.monotonic()
+        for session, (_, deadline) in list(self.presence.items()):
+            if deadline <= now:
+                del self.presence[session]
+
+    def check_room_capacity(self, room: str) -> None:
+        self.prune_presence()
+        if (self.connection.execute("SELECT 1 FROM messages WHERE room=? LIMIT 1", (room,)).fetchone()
+                or any(channel == room for channel, _ in self.presence)):
+            return
+        rooms = {row[0] for row in self.connection.execute("SELECT DISTINCT room FROM messages")}
+        rooms.update(channel for channel, _ in self.presence)
+        if room not in rooms and len(rooms) >= self.max_rooms:
+            raise NoiseChatError("Relay room capacity reached.")
+
+    def connect(self, room: str, token: str, envelope: str, announcement: str) -> bool:
+        validate_envelope(envelope)
+        validate_envelope(announcement)
+        with self.condition:
+            if self.closed:
+                raise NoiseChatError("Relay is shutting down.")
+            self.prune_presence()
+            session = (room, token)
+            joined = session not in self.presence
+            if joined:
+                if (len(self.presence) >= MAX_PRESENCE or
+                        sum(channel == room for channel, _ in self.presence) >= MAX_PRESENCE_PER_ROOM):
+                    raise NoiseChatError("Relay user capacity reached.")
+                # Publish once per live session, including retries after a lost receipt.
+                self.post(room, announcement)
+            self.presence[session] = (envelope, time.monotonic() + PRESENCE_TTL)
+            return joined
+
+    def users(self, room: str) -> list[str]:
+        with self.condition:
+            if self.closed:
+                raise NoiseChatError("Relay is shutting down.")
+            self.prune_presence()
+            return [envelope for (channel, _), (envelope, _) in self.presence.items() if channel == room]
+
+    def disconnect(self, room: str, token: str) -> None:
+        with self.condition:
+            self.presence.pop((room, token), None)
 
     def poll(self, room: str, after: int, wait: float = 0) -> list[dict]:
         deadline = time.monotonic() + wait
@@ -73,6 +118,7 @@ class RelayStore:
     def close(self) -> None:
         with self.condition:
             self.closed = True
+            self.presence.clear()
             self.condition.notify_all()
             self.connection.close()
 
@@ -148,16 +194,21 @@ class RelayHandler(BaseHTTPRequestHandler):
         if parsed.scheme or parsed.netloc or parsed.fragment:
             raise NoiseChatError("Invalid request target.")
         match = ROOM_PATH.fullmatch(parsed.path)
-        return parsed, match.group(1) if match else None
+        return parsed, match.group(1) if match else None, match.group(2) if match else None
 
     def do_GET(self):
         try:
-            parsed, room = self.route()
+            parsed, room, resource = self.route()
             if parsed.path == "/health" and not parsed.query:
                 self.respond(200, {"ok": True, "version": __version__, "protocol": 1})
                 return
             if room is None:
                 self.respond(404, {"error": "Not found."})
+                return
+            if resource == "presence":
+                if parsed.query:
+                    raise NoiseChatError("Invalid presence parameters.")
+                self.respond(200, {"users": self.server.store.users(room)})
                 return
             query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
             if set(query) - {"after", "wait"} or any(len(values) != 1 for values in query.values()):
@@ -177,7 +228,7 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            parsed, room = self.route()
+            parsed, room, resource = self.route()
             if room is None or parsed.query:
                 self.respond(404, {"error": "Not found."})
                 return
@@ -197,6 +248,17 @@ class RelayHandler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise NoiseChatError("Incomplete request.")
             body = json.loads(raw)
+            if resource == "presence":
+                if (not isinstance(body, dict) or set(body) not in ({"token"}, {"token", "envelope", "announcement"})
+                        or not isinstance(body.get("token"), str) or not re.fullmatch(r"[0-9a-f]{64}", body["token"])):
+                    raise NoiseChatError("Invalid presence request.")
+                if set(body) == {"token"}:
+                    self.server.store.disconnect(room, body["token"])
+                    self.respond(200, {"left": True})
+                else:
+                    joined = self.server.store.connect(room, body["token"], body["envelope"], body["announcement"])
+                    self.respond(200, {"joined": joined})
+                return
             if not isinstance(body, dict) or set(body) != {"envelope"}:
                 raise NoiseChatError("Expected one encrypted envelope.")
             sequence = self.server.store.post(room, body["envelope"])
