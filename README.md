@@ -51,7 +51,7 @@ On Windows PowerShell, create one with `py -m venv .venv`, then activate it with
 Start the relay in one terminal:
 
 ```sh
-noisechat run --urls http://127.0.0.1:8713
+noisechat run --urls "http://127.0.0.1:8713"
 ```
 
 On your client, create the shared key once:
@@ -65,11 +65,11 @@ Choose a strong export passphrase when prompted. The raw key goes into your OS k
 Open two more terminals:
 
 ```sh
-noisechat chat friends --server http://127.0.0.1:8713 --name Alice
+noisechat chat friends --server "http://127.0.0.1:8713" --name Alice
 ```
 
 ```sh
-noisechat chat friends --server http://127.0.0.1:8713 --name Bob
+noisechat chat friends --server "http://127.0.0.1:8713" --name Bob
 ```
 
 Type a message and press Enter. Everyone in the channel receives an encrypted `[Wall] Alice joined the chat.` announcement when Alice connects. `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and join announcements appear when you connect. Incoming messages print as they arrive, so they may appear while you're typing in this basic terminal interface.
@@ -82,29 +82,29 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 | --- | --- |
 | `noisechat --help` | List the available commands. Use `noisechat COMMAND --help` for its arguments. |
 | `noisechat --version` | Print the installed release version. |
-| `noisechat run [--urls HTTP_URL]` | Run the HTTP relay; defaults to `http://127.0.0.1:8713`. Use `--urls` to specify its listen IP/host and port. |
+| `noisechat run [--urls "HTTP_URL"]` | Run the HTTP relay; defaults to `http://127.0.0.1:8713`. Use `--urls` to specify its listen IP/host and port. |
 | `noisechat key --help` | List the key-management subcommands. |
 | `noisechat key create CHAT` | Generate a new shared key and save it in the OS keyring. |
 | `noisechat key import CHAT FILE` | Unlock a password-encrypted key file and save its key in the OS keyring. |
 | `noisechat key export CHAT FILE` | Write a password-encrypted copy of an existing key for USB distribution or backup. |
 | `noisechat key info CHAT` | Show the derived room ID so friends can compare keys, without printing the secret key. |
 | `noisechat key remove CHAT` | Delete your local keyring entry; other people's copies and exported files still work. |
-| `noisechat chat CHAT --server SERVER --name NAME` | Join a channel, announce your arrival, and send and receive interactively. Keeps your online status refreshed while running. |
-| `noisechat users CHAT [CHAT ...] --server SERVER` | List all connected chat sessions and their channels for one or more shared keys you hold. |
-| `noisechat send CHAT --server SERVER --name NAME` | Prompt for one message, encrypt and send it, then exit. Does not join the online roster. |
-| `noisechat listen CHAT --server SERVER` | Read retained messages and keep listening. This is an unnamed, receive-only command; it does not join the online roster. |
+| `noisechat chat CHAT --server "SERVER" --name NAME` | Join a channel, announce your arrival, and send and receive interactively. Keeps your online status refreshed while running. |
+| `noisechat users CHAT [CHAT ...] --server "SERVER"` | List all connected chat sessions and their channels for one or more shared keys you hold. |
+| `noisechat send CHAT --server "SERVER" --name NAME` | Prompt for one message, encrypt and send it, then exit. Does not join the online roster. |
+| `noisechat listen CHAT --server "SERVER"` | Read retained messages and keep listening. This is an unnamed, receive-only command; it does not join the online roster. |
 | `noisechat encrypt CHAT --name NAME` | Prompt for text and print copyable ciphertext without contacting a server. |
 | `noisechat decrypt CHAT` | Prompt for ciphertext and decrypt it locally without contacting a server. |
 
 | Option | Applies to | What it does |
 | --- | --- | --- |
-| `--urls HTTP_URL` | `run` | One HTTP listen URL with an explicit port; defaults to `http://127.0.0.1:8713`. Use `http://0.0.0.0:8713` for other machines. Port `0` asks the OS to choose an available port. |
+| `--urls "HTTP_URL"` | `run` | One HTTP listen URL with an explicit port; defaults to `http://127.0.0.1:8713`. Use `http://0.0.0.0:8713` for other machines. Port `0` asks the OS to choose an available port. |
 | `--database FILE` | `run` | SQLite ciphertext database; defaults to `relay.sqlite3` in the current directory. |
 | `--export FILE` | `key create` | Also write a password-encrypted copy of the new key. |
 | `--no-store` | `key create` | Save only the encrypted export instead of using the keyring; requires `--export`. |
 | `--replace` | `key import` | Explicitly allow replacing a key already saved under the local chat name. |
 | `--key-file FILE` | `key info`, `chat`, `users`, `send`, `listen`, `encrypt`, `decrypt` | Unlock an encrypted file instead of reading the keyring. For `users`, this supports one channel per invocation. |
-| `--server URL` | `chat`, `users`, `send`, `listen` | Required relay URL. |
+| `--server "URL"` | `chat`, `users`, `send`, `listen` | Required relay URL. |
 | `--name NAME` | `chat`, `send`, `encrypt` | Required display name, encrypted before transmission. |
 | `--stdin` | `send`, `encrypt` | Read UTF-8 message text from standard input instead of prompting. |
 | `--once` | `listen` | Read one batch immediately, print its cursor, and exit. |
@@ -123,8 +123,8 @@ Inside interactive `chat`:
 From another terminal, list every connected chat session in one or more channels:
 
 ```sh
-noisechat users friends --server http://127.0.0.1:8713
-noisechat users friends work --server http://127.0.0.1:8713
+noisechat users friends --server "http://127.0.0.1:8713"
+noisechat users friends work --server "http://127.0.0.1:8713"
 ```
 
 The output has `USER` and `CHANNEL` columns. Channel labels are your local key aliases; two people can call the same channel different things. Duplicate aliases for the same shared key are listed once. Multiple connections using the same display name appear as separate sessions.
@@ -142,7 +142,7 @@ Copy `friends.noise-key` onto the USB drive. Give your friend the export passphr
 ```sh
 noisechat key import friends /path/to/usb/friends.noise-key
 noisechat key info friends
-noisechat chat friends --server https://your-relay.example.com --name Bob
+noisechat chat friends --server "https://your-relay.example.com" --name Bob
 ```
 
 Windows paths work too, for example `E:\friends.noise-key`. Compare the room ID printed by `key info` with yours to confirm that you imported the same key. Their local chat name can differ; the key determines the room.
@@ -165,7 +165,7 @@ If a Linux machine has no desktop keyring, keep only an encrypted key file and u
 
 ```sh
 noisechat key create friends --export friends.noise-key --no-store
-noisechat chat friends --key-file friends.noise-key --server http://127.0.0.1:8713 --name Alice
+noisechat chat friends --key-file friends.noise-key --server "http://127.0.0.1:8713" --name Alice
 ```
 
 The passphrase is prompted with input hidden; it is never a command-line argument or environment variable. With `--key-file`, the chat key is kept in process memory and isn't saved in a credential store. Exports are created with mode 0600 on Unix and remain password-encrypted on every OS.
@@ -184,14 +184,14 @@ Removing a local key doesn't revoke anyone else's copy. To remove a person from 
 Send one message, prompted interactively:
 
 ```sh
-noisechat send friends --server http://127.0.0.1:8713 --name Alice
+noisechat send friends --server "http://127.0.0.1:8713" --name Alice
 ```
 
 Read one batch and exit, or listen continuously:
 
 ```sh
-noisechat listen friends --server http://127.0.0.1:8713 --once
-noisechat listen friends --server http://127.0.0.1:8713
+noisechat listen friends --server "http://127.0.0.1:8713" --once
+noisechat listen friends --server "http://127.0.0.1:8713"
 ```
 
 `--once` prints a cursor that can be used as `--after NUMBER` on the next invocation. Each batch contains at most 100 messages. Continuous listening and live chat read further batches automatically. A relay acceptance confirms storage, not that a friend read the message.
@@ -210,7 +210,7 @@ noisechat decrypt friends
 For access from other machines on your LAN:
 
 ```sh
-noisechat run --urls http://0.0.0.0:8713 --database relay.sqlite3
+noisechat run --urls "http://0.0.0.0:8713" --database relay.sqlite3
 ```
 
 `0.0.0.0` listens on all IPv4 interfaces. Clients connect using the server's actual LAN IP or hostname, such as `http://192.168.1.50:8713`; `0.0.0.0` is a bind address, not the address to give friends. `127.0.0.1` limits the relay to clients on the same machine. One listen URL is supported per process; it must use `http://` and include a port. IPv6 addresses use brackets, for example `http://[::1]:8713`.
@@ -220,13 +220,13 @@ noisechat run --urls http://0.0.0.0:8713 --database relay.sqlite3
 The default port is **8713**. Set a different port in `--urls` when starting the relay:
 
 ```sh
-noisechat run --urls http://0.0.0.0:9000
+noisechat run --urls "http://0.0.0.0:9000"
 ```
 
 Clients must use the same port in `--server`:
 
 ```sh
-noisechat chat friends --server http://192.168.1.50:9000 --name Alice
+noisechat chat friends --server "http://192.168.1.50:9000" --name Alice
 ```
 
 If you save the relay command in a startup script or service, change `--urls` there to keep your chosen port across restarts. To change the program's built-in default instead, edit `DEFAULT_RELAY_URL` near the top of `noisechat/cli.py`, then reinstall with `python -m pip install .`. There is no separate port configuration file. Running `noisechat run` without `--urls` uses that default.
