@@ -231,6 +231,7 @@ def parser() -> argparse.ArgumentParser:
     server.add_argument("--auth-file", type=Path, metavar="FILE", help="password hash file (default: DATABASE.auth.json)")
     server.add_argument("--reset-password", action="store_true", help="set a new server password before starting the relay")
     server.add_argument("--password-file", type=Path, metavar="FILE", help="read the server password from a private file for setup/reset")
+    server.add_argument("--cloudflare-tunnel", action="store_true", help="use Cloudflare visitor IPs for limits; requires a loopback listener and local cloudflared")
 
     key = commands.add_parser("key", help="create, import, export, inspect, or remove chat keys")
     actions = key.add_subparsers(dest="key_action", required=True)
@@ -282,8 +283,10 @@ def main(argv=None) -> int:
         if args.command == "run":
             host, port = listen_address(args.urls)
             # Server setup does not touch the OS keyring or load a chat key.
-            from .relay import serve
-            serve(host, port, args.database, server_verifier(args))
+            from .relay import serve, tunnel_listen_host
+            if args.cloudflare_tunnel:
+                host = tunnel_listen_host(host)
+            serve(host, port, args.database, server_verifier(args), cloudflare_tunnel=args.cloudflare_tunnel)
         elif args.command == "key":
             key_command(args)
         elif args.command == "chat":

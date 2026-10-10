@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -176,7 +177,8 @@ class WireSocket:
 
 class InProcessHTTP:
     def __init__(self, store):
-        self.server = SimpleNamespace(store=store, access=RelayAccess(SERVER_VERIFIER), allow_post=lambda address: True)
+        self.server = SimpleNamespace(store=store, access=RelayAccess(SERVER_VERIFIER), cloudflare_tunnel=False,
+                                      allow_post=lambda address: True)
         self.token = self.server.access.login(SERVER_PASSWORD)
         self.requests = []
 
@@ -842,6 +844,124 @@ class AccessTests(unittest.TestCase):
             serve.assert_not_called()
 
 
+class CloudflareTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.store = RelayStore(Path(self.directory.name) / "relay.sqlite3")
+        self.wire = InProcessHTTP(self.store)
+        self.wire.server.cloudflare_tunnel = True
+        self.key = generate_key()
+        self.room = room_id(self.key)
+
+    def tearDown(self):
+        self.store.close()
+        self.directory.cleanup()
+
+    def request(self, target, method="GET", body=None, visitor="192.0.2.1", peer="127.0.0.1", extra_headers=""):
+        headers = extra_headers
+        if visitor is not None:
+            headers += f"CF-Connecting-IP: {visitor}\r\n"
+        data = b"" if body is None else json.dumps(body).encode()
+        if body is not None:
+            headers += f"Content-Type: application/json\r\nContent-Length: {len(data)}\r\n"
+        raw = (f"{method} {target} HTTP/1.0\r\n{headers}\r\n").encode() + data
+        return self.wire.raw(raw, address=peer)
+
+    def login(self, visitor="192.0.2.1", password="incorrect password words", peer="127.0.0.1", extra_headers=""):
+        return self.request("/v1/auth/login", "POST", {"password": password}, visitor, peer, extra_headers)
+
+    def test_tunnel_visitors_get_separate_login_cooldowns_and_expiry(self):
+        with patch("noisechat.auth.time.monotonic", return_value=100):
+            for _ in range(5):
+                self.assertEqual(self.login().status, 401)
+            response = self.login(password=SERVER_PASSWORD)
+            self.assertEqual(response.status, 429)
+            self.assertEqual(response.headers["Retry-After"], "60")
+            self.assertEqual(self.login(visitor="192.0.2.2", password=SERVER_PASSWORD).status, 200)
+            self.assertNotIn("127.0.0.1", self.wire.server.access.attempts)
+            self.assertEqual(self.request(f"/v1/rooms/{self.room}/messages?wait=0").status, 200)
+        with patch("noisechat.auth.time.monotonic", return_value=160):
+            self.assertEqual(self.login(password=SERVER_PASSWORD).status, 200)
+
+    def test_ipv6_and_mapped_ipv4_cannot_split_cooldown_with_alternate_spellings(self):
+        with patch("noisechat.auth.time.monotonic", return_value=100):
+            for index in range(5):
+                address = "2001:db8::1" if index % 2 else "2001:0db8:0000:0000:0000:0000:0000:0001"
+                self.assertEqual(self.login(visitor=address, peer="::1").status, 401)
+            self.assertEqual(self.login(visitor="2001:db8:0::1", peer="::ffff:127.0.0.1").status, 429)
+            self.assertEqual(self.login(visitor="2001:db8::2", password=SERVER_PASSWORD, peer="::1").status, 200)
+            for _ in range(5):
+                self.assertEqual(self.login(visitor="192.0.2.1").status, 401)
+            self.assertEqual(self.login(visitor="::ffff:c000:201").status, 429)
+
+    def test_tunnel_rejects_missing_invalid_duplicate_or_untrusted_headers(self):
+        invalid = [None, "", "not-an-ip", "192.0.2.1, 192.0.2.2", "192.0.2.1:1234",
+                   "[2001:db8::1]", "fe80::1%eth0", "x" * 100, "192.000.002.001"]
+        for visitor in invalid:
+            with self.subTest(visitor=visitor):
+                self.assertEqual(self.login(visitor=visitor).status, 403)
+                self.assertEqual(self.request(f"/v1/rooms/{self.room}/messages", visitor=visitor).status, 403)
+        self.assertEqual(self.login(extra_headers="CF-Connecting-IP: 192.0.2.2\r\n").status, 403)
+        self.assertEqual(self.login(peer="192.168.1.20").status, 403)
+        self.assertEqual(self.wire.server.access.attempts, {})
+        self.assertEqual(self.store.channels(), [])
+        # Health checks do not need a visitor identity or consume a login attempt.
+        self.assertEqual(self.request("/health", visitor=None).status, 200)
+
+    def test_direct_mode_ignores_cloudflare_and_other_forwarded_headers(self):
+        self.wire.server.cloudflare_tunnel = False
+        with patch("noisechat.auth.time.monotonic", return_value=100):
+            for index in range(5):
+                self.assertEqual(self.login(visitor=f"192.0.2.{index + 1}", extra_headers="X-Forwarded-For: 198.51.100.1\r\n").status, 401)
+            self.assertEqual(self.login(visitor="192.0.2.99", password=SERVER_PASSWORD).status, 429)
+            self.assertEqual(self.login(visitor=None, peer="192.0.2.3", password=SERVER_PASSWORD).status, 200)
+        self.assertEqual(set(self.wire.server.access.attempts), {"127.0.0.1", "192.0.2.3"})
+
+    def test_tunnel_message_and_presence_limits_use_visitor_ip(self):
+        server = self.wire.server
+        server.rate_lock, server.rates = threading.Lock(), OrderedDict()
+        server.allow_post = lambda address: RelayServer.allow_post(server, address)
+        envelope = encrypt_message(self.key, "Alice", "rate-limited message")
+        target = f"/v1/rooms/{self.room}/messages"
+        with patch("noisechat.relay.time.monotonic", return_value=100):
+            for _ in range(30):
+                self.assertEqual(self.request(target, "POST", {"envelope": envelope}).status, 201)
+            self.assertEqual(self.request(target, "POST", {"envelope": envelope}).status, 429)
+            body = {"token": "a" * 64, "envelope": encrypt_event(self.key, "Alice", "presence"),
+                    "announcement": encrypt_event(self.key, "Alice", "join")}
+            self.assertEqual(self.request(f"/v1/rooms/{self.room}/presence", "POST", body).status, 429)
+            self.assertEqual(self.request(f"/v1/rooms/{self.room}/presence", "POST", body, visitor="192.0.2.2").status, 200)
+            self.assertEqual(self.request(target, "POST", {"envelope": envelope}, visitor="192.0.2.2").status, 201)
+            self.assertEqual(set(server.rates), {"192.0.2.1", "192.0.2.2"})
+        with patch("noisechat.relay.time.monotonic", return_value=101):
+            self.assertEqual(self.request(target, "POST", {"envelope": envelope}).status, 201)
+
+    def test_tunnel_cli_accepts_only_loopback_before_password_setup(self):
+        with patch("noisechat.cli.server_verifier", return_value=SERVER_VERIFIER) as verifier, patch("noisechat.relay.serve") as serve:
+            for url, expected_host in (("http://127.0.0.1:8713", "127.0.0.1"), ("http://localhost:8713", "127.0.0.1"), ("http://[::1]:8713", "::1")):
+                self.assertEqual(cli.main(["run", "--urls", url, "--cloudflare-tunnel"]), 0)
+                serve.assert_called_with(expected_host, 8713, Path("relay.sqlite3"), SERVER_VERIFIER, cloudflare_tunnel=True)
+            verifier.reset_mock()
+            serve.reset_mock()
+            for host in ("0.0.0.0", "192.168.1.20", "[::]", "[fe80::1%eth0]", "example.com"):
+                with self.subTest(host=host), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(cli.main(["run", "--urls", f"http://{host}:8713", "--cloudflare-tunnel"]), 1)
+                    self.assertIn("loopback", errors.getvalue())
+            verifier.assert_not_called()
+            serve.assert_not_called()
+
+    def test_server_enforces_tunnel_bind_restriction_without_cli(self):
+        for host in ("0.0.0.0", "192.168.1.20", "::", "example.com"):
+            with self.subTest(host=host), patch("noisechat.relay.ThreadingHTTPServer.__init__") as bind:
+                with self.assertRaisesRegex(NoiseChatError, "loopback"):
+                    RelayServer((host, 8713), self.store, SERVER_VERIFIER, cloudflare_tunnel=True)
+                bind.assert_not_called()
+        with patch("noisechat.relay.ThreadingHTTPServer.__init__") as bind:
+            server = RelayServer(("localhost", 8713), self.store, SERVER_VERIFIER, cloudflare_tunnel=True)
+            bind.assert_called_once_with(("127.0.0.1", 8713), RelayHandler)
+            self.assertTrue(server.cloudflare_tunnel)
+
+
 class RunTests(unittest.TestCase):
     def test_relay_console_runs_only_with_an_attached_terminal(self):
         for interactive in [True, False]:
@@ -863,13 +983,13 @@ class RunTests(unittest.TestCase):
     def test_default_and_custom_listen_urls_start_relay_without_client_keys(self):
         with patch("noisechat.cli.server_verifier", return_value=SERVER_VERIFIER), patch("noisechat.relay.serve") as serve, patch("noisechat.cli.KeyStore", side_effect=AssertionError("A relay must not load client keys")):
             self.assertEqual(cli.main(["run"]), 0)
-            serve.assert_called_with("127.0.0.1", 8713, Path("relay.sqlite3"), SERVER_VERIFIER)
+            serve.assert_called_with("127.0.0.1", 8713, Path("relay.sqlite3"), SERVER_VERIFIER, cloudflare_tunnel=False)
             self.assertEqual(cli.main(["run", "--urls", "http://0.0.0.0:9000", "--database", "custom.sqlite3"]), 0)
-            serve.assert_called_with("0.0.0.0", 9000, Path("custom.sqlite3"), SERVER_VERIFIER)
+            serve.assert_called_with("0.0.0.0", 9000, Path("custom.sqlite3"), SERVER_VERIFIER, cloudflare_tunnel=False)
             self.assertEqual(cli.main(["run", "--urls", "http://localhost:0/"]), 0)
-            serve.assert_called_with("localhost", 0, Path("relay.sqlite3"), SERVER_VERIFIER)
+            serve.assert_called_with("localhost", 0, Path("relay.sqlite3"), SERVER_VERIFIER, cloudflare_tunnel=False)
             self.assertEqual(cli.main(["run", "--urls", "http://[::1]:8713"]), 0)
-            serve.assert_called_with("::1", 8713, Path("relay.sqlite3"), SERVER_VERIFIER)
+            serve.assert_called_with("::1", 8713, Path("relay.sqlite3"), SERVER_VERIFIER, cloudflare_tunnel=False)
 
     def test_invalid_listen_urls_do_not_start_server(self):
         invalid = ["", "localhost:8713", "http://localhost", "https://localhost:8713",
@@ -911,7 +1031,6 @@ class ClientTests(unittest.TestCase):
     def test_post_rate_limit_and_bounded_ip_cache(self):
         server=RelayServer.__new__(RelayServer)
         server.rate_lock=threading.Lock()
-        from collections import OrderedDict
         server.rates=OrderedDict()
         with patch("noisechat.relay.time.monotonic",return_value=100):
             for _ in range(30):self.assertTrue(server.allow_post("one-client"))
