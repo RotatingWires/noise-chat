@@ -14,11 +14,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
+from .auth import PasswordVerifier, RelayAccess
 from .crypto import MAX_PRESENCE_PER_ROOM, PRESENCE_TTL, ChannelDeletedError, NoiseChatError, validate_envelope
 
 MAX_REQUEST_BYTES = 16384
 MAX_PRESENCE = 1000
 ROOM_PATH = re.compile(r"/v1/rooms/([0-9a-f]{64})/(messages|presence)")
+
+
+class RequestTooLargeError(NoiseChatError):
+    pass
 
 
 class RelayStore:
@@ -161,10 +166,11 @@ class RelayServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, store: RelayStore):
+    def __init__(self, address, store: RelayStore, verifier: PasswordVerifier):
         if ":" in address[0]:
             self.address_family = socket.AF_INET6
         self.store = store
+        self.access = RelayAccess(verifier)
         self.workers = threading.BoundedSemaphore(64)
         self.rate_lock = threading.Lock()
         self.rates = OrderedDict()
@@ -214,16 +220,52 @@ class RelayHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def respond(self, status: int, body: dict) -> None:
+    def respond(self, status: int, body: dict, headers: dict | None = None) -> None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
+        for name, value in (headers or {}).items():
+            self.send_header(name, str(value))
         self.end_headers()
         self.wfile.write(data)
         self.close_connection = True
+
+    def require_access(self) -> bool:
+        if self.server.access.authorized(self.headers.get_all("Authorization", [])):
+            return True
+        self.respond(401, {"error": "Server login required."}, {"WWW-Authenticate": 'Bearer realm="NoiseChat"'})
+        return False
+
+    def read_json(self):
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,6}", lengths[0]):
+            raise NoiseChatError("A valid Content-Length is required.")
+        length = int(lengths[0])
+        if length > MAX_REQUEST_BYTES:
+            raise RequestTooLargeError()
+        if self.headers.get_content_type() != "application/json":
+            raise NoiseChatError("Expected JSON.")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise NoiseChatError("Incomplete request.")
+        return json.loads(raw)
+
+    def login(self) -> None:
+        retry = self.server.access.login_attempt(self.client_address[0])
+        if retry:
+            self.respond(429, {"error": "Too many login attempts.", "retry_after": retry}, {"Retry-After": retry})
+            return
+        body = self.read_json()
+        if not isinstance(body, dict) or set(body) != {"password"} or not isinstance(body["password"], str):
+            raise NoiseChatError("Expected a server password.")
+        token = self.server.access.login(body["password"])
+        if token is None:
+            self.respond(401, {"error": "Incorrect server password."})
+        else:
+            self.respond(200, {"token": token})
 
     def route(self):
         parsed = urlsplit(self.path)
@@ -237,6 +279,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             parsed, room, resource = self.route()
             if parsed.path == "/health" and not parsed.query:
                 self.respond(200, {"ok": True, "version": __version__, "protocol": 1})
+                return
+            if not self.require_access():
                 return
             if room is None:
                 self.respond(404, {"error": "Not found."})
@@ -267,25 +311,18 @@ class RelayHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             parsed, room, resource = self.route()
+            if parsed.path == "/v1/auth/login" and not parsed.query:
+                self.login()
+                return
+            if not self.require_access():
+                return
             if room is None or parsed.query:
                 self.respond(404, {"error": "Not found."})
                 return
             if not self.server.allow_post(self.client_address[0]):
                 self.respond(429, {"error": "Too many messages. Try again shortly."})
                 return
-            lengths = self.headers.get_all("Content-Length", [])
-            if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,6}", lengths[0]):
-                raise NoiseChatError("A valid Content-Length is required.")
-            length = int(lengths[0])
-            if length > MAX_REQUEST_BYTES:
-                self.respond(413, {"error": "Request is too large."})
-                return
-            if self.headers.get_content_type() != "application/json":
-                raise NoiseChatError("Expected JSON.")
-            raw = self.rfile.read(length)
-            if len(raw) != length:
-                raise NoiseChatError("Incomplete request.")
-            body = json.loads(raw)
+            body = self.read_json()
             if resource == "presence":
                 if (not isinstance(body, dict) or set(body) not in ({"token"}, {"token", "envelope", "announcement"})
                         or not isinstance(body.get("token"), str) or not re.fullmatch(r"[0-9a-f]{64}", body["token"])):
@@ -303,6 +340,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.respond(201, {"sequence": sequence})
         except ChannelDeletedError:
             self.respond(410, {"error": "Channel deleted."})
+        except RequestTooLargeError:
+            self.respond(413, {"error": "Request is too large."})
         except (NoiseChatError, UnicodeError, ValueError, RecursionError):
             self.respond(400, {"error": "Invalid encrypted message or relay capacity reached."})
         except sqlite3.Error:
@@ -344,13 +383,13 @@ def console(store: RelayStore, server: RelayServer) -> None:
             print("Error: Relay database could not be updated.")
 
 
-def serve(host: str, port: int, database: Path) -> None:
+def serve(host: str, port: int, database: Path, verifier: PasswordVerifier) -> None:
     store = RelayStore(database)
     try:
-        server = RelayServer((host, port), store)
+        server = RelayServer((host, port), store, verifier)
         address = f"[{host}]" if ":" in host else host
         print(f"NoiseChat v{__version__} relay on http://{address}:{server.server_port}", flush=True)
-        print("Stores ciphertext only. Press Ctrl+C to stop.", flush=True)
+        print("Server password required. Stores ciphertext only. Press Ctrl+C to stop.", flush=True)
         if sys.stdin.isatty():
             threading.Thread(target=console, args=(store, server), daemon=True).start()
         try:

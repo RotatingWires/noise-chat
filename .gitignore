@@ -8,3 +8,5 @@ dist/
 *.sqlite3-shm
 *.sqlite3-wal
 *.noise-key
+*.auth.json
+*.noise-password

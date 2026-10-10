@@ -1,11 +1,11 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.3.0
+# NoiseChat v0.4.0
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
-One shared random key identifies one chat. Give friends a password-encrypted copy on a USB drive. They import it into their device's keyring, then connect to the same relay. No accounts, web interface, or audio in this first version.
+One shared random key identifies one chat. Give friends a password-encrypted copy on a USB drive and your separate server access password. They import the chat key into their device's keyring, then connect to the same relay. No accounts, web interface, or audio in this first version.
 
 ## Project stack
 
@@ -13,6 +13,7 @@ One shared random key identifies one chat. Give friends a password-encrypted cop
 - Python `argparse` for commands and options.
 - Python `http.server.ThreadingHTTPServer` and `BaseHTTPRequestHandler` for the HTTP backend.
 - Python `urllib.request` for client requests and long polling.
+- Python `hashlib` and `secrets` for salted server-password hashes and temporary access tokens.
 - SQLite through Python's built-in `sqlite3`, with WAL mode for retained ciphertext.
 - `cryptography` for AES-256-GCM, HKDF, and scrypt.
 - `keyring` for native OS credential storage on clients.
@@ -20,7 +21,7 @@ One shared random key identifies one chat. Give friends a password-encrypted cop
 
 ## Backend
 
-The relay backend lives in `noisechat/relay.py`. It runs on Python's built-in [`http.server.ThreadingHTTPServer`](https://docs.python.org/3/library/http.server.html#http.server.ThreadingHTTPServer), with a custom `BaseHTTPRequestHandler`. It is an HTTP web server exposing a JSON API: clients POST encrypted messages and use long-polling GET requests to receive them. A bounded number of request threads lets clients wait for incoming messages while other requests are handled.
+The relay backend lives in `noisechat/relay.py`. It runs on Python's built-in [`http.server.ThreadingHTTPServer`](https://docs.python.org/3/library/http.server.html#http.server.ThreadingHTTPServer), with a custom `BaseHTTPRequestHandler`. It is an HTTP web server exposing a JSON API: clients first log in with the server access password, then POST encrypted messages and use long-polling GET requests to receive them. A bounded number of request threads lets clients wait for incoming messages while other requests are handled. `noisechat/auth.py` owns password verification, temporary sessions, and the login cooldown.
 
 SQLite stores encrypted messages and join announcements across restarts. Online presence is held in memory, refreshed by clients, and removed on departure or expiry. The backend routes packets by their derived room IDs and maintains retention, size, worker, and rate limits. All names and message contents are encrypted on clients; the relay never receives chat keys or decrypts these packets. Native keyrings and encrypted USB key files belong to the clients.
 
@@ -28,11 +29,40 @@ SQLite stores encrypted messages and join announcements across restarts. Online 
 
 ## Access and authentication
 
-NoiseChat currently has **no server login, authentication cookie, or API-key requirement**. The shared chat key protects message contents and lets clients authenticate encrypted packets; it does not authorize access to the relay's HTTP API. Rate limits and capacity limits are not a login system.
+NoiseChat requires a **server access password** before clients can read history, send packets, join, refresh or leave presence, or list connected users. It is separate from the shared chat key and from the passphrase used to encrypt a USB key export. The server password lets someone use your relay; a channel's key lets them read and produce valid messages in that channel. There are no accounts or authentication cookies.
 
-With the default `http://127.0.0.1:8713` listener, only programs on the server machine can reach the relay directly. With `--urls "http://0.0.0.0:8713"`, anyone on the LAN who can reach that port through the firewall can contact the relay and use their own shared key to start their own channel. Your friends need your channel's key to read its messages or produce messages your clients will accept.
+On first run, the relay prompts for a server password of at least 12 characters and confirmation, with input hidden. It saves a random salt and a PBKDF2-HMAC-SHA256 hash with 600,000 iterations, following the [OWASP password-storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#pbkdf2). The default hash file is `DATABASE.auth.json`, beside the selected database; for the default database, that is `relay.sqlite3.auth.json`. Subsequent starts load that verifier without prompting. `--auth-file FILE` selects another location. The password is not stored in the database or hash file.
 
-The room ID is an unguessable routing identifier derived from the key, not the key itself. Anyone who learns a room ID can fetch its encrypted history and submit structurally valid encrypted packets without proving they hold the key. Clients reject packets they cannot authenticate, but the server cannot distinguish a genuine message from junk encrypted with the wrong key. There is no public endpoint listing all room IDs. Plain HTTP exposes room IDs and session tokens to network observers; HTTPS protects the transport but does not add a NoiseChat login. Restrict network access to the people/devices you intend to let use the relay.
+Clients prompt for the server password once per command, also with input hidden. Login uses `POST /v1/auth/login`; a successful login returns a random token sent in the `Authorization: Bearer` header on channel requests. Tokens are held in client memory and stored only as hashes in server memory. They expire after 12 hours, and a relay restart invalidates them. Clients log in again automatically after expiry or a restart while keeping their in-memory message cursor. An incorrect password or login cooldown stops background retries. `/health` remains public and exposes only basic health and version information.
+
+Like TL and TLS, login permits **five attempts per source IP in a one-minute window**, including successful and malformed attempts. Further attempts receive HTTP 429 with `Retry-After` and the CLI reports how many seconds to wait. Retrying during the cooldown does not extend it. Normal authenticated polling and messages do not count as logins. Attempts and sessions are bounded and kept only in memory, so restarting the relay clears the cooldown. Behind a reverse proxy or Cloudflare Tunnel, clients can share the proxy's IP allowance; arbitrary forwarding headers do not bypass it. Existing message rate limits apply separately.
+
+With the default `http://127.0.0.1:8713` listener, only programs on the server machine can reach the relay directly. With `--urls "http://0.0.0.0:8713"`, people on the LAN can contact its listener if the firewall allows it, but need the server password to use channel endpoints. Anyone you give that password can start their own channels with their own chat keys. Your friends still need your channel's key to read its messages or produce messages your clients will accept.
+
+The room ID is an unguessable routing identifier derived from the chat key, not the key itself. A server-password holder who learns a room ID can fetch its encrypted history and submit structurally valid packets without proving they hold that channel's key. Clients reject packets they cannot authenticate, but the relay cannot decrypt packets to check them. There is no public endpoint listing room IDs, and knowing a room ID alone does not bypass the server login.
+
+**Use HTTPS for remote connections.** The server password is sent during login, and session tokens authorize later requests; plain HTTP exposes both to network observers even though message bodies remain encrypted. HTTPS protects these credentials in transit. Upgrade the relay and clients to v0.4.0 together: older clients cannot log in to the protected relay.
+
+### Change the server password
+
+Stop the running relay, then start it with the same database and authentication-file settings plus `--reset-password`:
+
+```sh
+noisechat run --urls "http://127.0.0.1:8713" --reset-password
+```
+
+Enter and confirm the new password. This local startup option also resets a forgotten password; there is no remote reset endpoint. Give the new password to your friends. Old sessions are invalid after the restart, and clients using the old password must reconnect with the new one. Channel keys and stored message history stay the same. Editing the hash file while the relay is running does not change its loaded verifier.
+
+### Background commands and services
+
+`--password-file FILE` reads a UTF-8 server password from a file instead of prompting. Use it on `chat`, `send`, `listen`, or `users`; on `run`, it sets the password during first-run setup or `--reset-password`. An existing verifier is loaded on ordinary server restarts, so a configured service needs only the hash file and database. Changing a password file does not automatically reset an existing server password.
+
+```sh
+noisechat run --urls "http://127.0.0.1:8713" --password-file server.noise-password
+noisechat listen friends --server "https://your-relay.example.com" --password-file server.noise-password
+```
+
+The password file contains **plaintext credentials**, unlike the server's hash file or encrypted USB key export. Restrict it to the service/client account: `chmod 600 server.noise-password` on Unix, or the equivalent Windows file permissions. Unix clients reject files readable or writable by other users. Files contain one line, with an optional final newline; passwords are limited to 1024 UTF-8 bytes. Passwords are never CLI arguments or environment variables. The client does not save a prompted server password to disk or the keyring, but retains it in process memory to renew its session. The relay keeps at most 1,000 live login sessions, expiring old sessions after 12 hours; multi-channel `users` shares one login.
 
 ## Install
 
@@ -75,6 +105,8 @@ Start the relay in one terminal:
 ```sh
 noisechat run --urls "http://127.0.0.1:8713"
 ```
+
+On first run, choose and confirm the separate server access password. Each client below asks for that same password when connecting.
 
 On your client, create the shared key once:
 
@@ -122,6 +154,9 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 | --- | --- | --- |
 | `--urls "HTTP_URL"` | `run` | One HTTP listen URL with an explicit port; defaults to `http://127.0.0.1:8713`. Use `http://0.0.0.0:8713` for other machines. Port `0` asks the OS to choose an available port. |
 | `--database FILE` | `run` | SQLite ciphertext database; defaults to `relay.sqlite3` in the current directory. |
+| `--auth-file FILE` | `run` | Server password hash file; defaults to `DATABASE.auth.json` beside the database. |
+| `--reset-password` | `run` | Set a new server password locally before starting; invalidates old sessions after restart. |
+| `--password-file FILE` | `run`, `chat`, `users`, `send`, `listen` | Read a server access password from a private UTF-8 file. For `run`, used only during first-run setup or password reset. |
 | `--export FILE` | `key create` | Also write a password-encrypted copy of the new key. |
 | `--no-store` | `key create` | Save only the encrypted export instead of using the keyring; requires `--export`. |
 | `--replace` | `key import` | Explicitly allow replacing a key already saved under the local chat name. |
@@ -170,7 +205,7 @@ Upgrade both the relay and clients to v0.2.0 for presence and join announcements
 
 ## Give a friend access
 
-Copy `friends.noise-key` onto the USB drive. Give your friend the export passphrase in person. On their device:
+Copy `friends.noise-key` onto the USB drive. Give your friend its export passphrase and the separate server access password in person. On their device:
 
 ```sh
 noisechat key import friends /path/to/usb/friends.noise-key
@@ -178,7 +213,7 @@ noisechat key info friends
 noisechat chat friends --server "https://your-relay.example.com" --name Bob
 ```
 
-Windows paths work too, for example `E:\friends.noise-key`. Compare the room ID printed by `key info` with yours to confirm that you imported the same key. Their local chat name can differ; the key determines the room.
+Windows paths work too, for example `E:\friends.noise-key`. Import asks for the export passphrase; connecting asks for the server access password. Compare the room ID printed by `key info` with yours to confirm that you imported the same key. Their local chat name can differ; the key determines the room.
 
 Each friend imports the **same exported key**. Running `key create` independently generates a different chat, even if everyone uses the name `friends`.
 
@@ -201,7 +236,7 @@ noisechat key create friends --export friends.noise-key --no-store
 noisechat chat friends --key-file friends.noise-key --server "http://127.0.0.1:8713" --name Alice
 ```
 
-The passphrase is prompted with input hidden; it is never a command-line argument or environment variable. With `--key-file`, the chat key is kept in process memory and isn't saved in a credential store. Exports are created with mode 0600 on Unix and remain password-encrypted on every OS.
+The key-file passphrase is prompted with input hidden; it is never a command-line argument or environment variable. Connecting also prompts for the separate server access password. With `--key-file`, the chat key is kept in process memory and isn't saved in a credential store. Exports are created with mode 0600 on Unix and remain password-encrypted on every OS.
 
 Export another password-encrypted copy:
 
@@ -295,9 +330,9 @@ Requests and responses are size-limited. The server permits at most 64 request h
 
 A Cloudflare Tunnel can forward a public HTTPS hostname to this relay. If `cloudflared` runs on the same machine, keep the relay bound to `http://127.0.0.1:8713` and point the tunnel's service URL there; clients use the public `https://...` hostname. This keeps the origin listener off the LAN and avoids opening an inbound router port, but the tunnel route still exposes the service through its public hostname.
 
-**A public tunnel alone does not add authentication.** Cloudflare says a published application without an Access application is available to anyone on the Internet. Message contents remain encrypted, but strangers could create channels, fill the room/history limits, evict retained messages, or consume relay capacity. See [Cloudflare's Access setup guidance](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/).
+**A public tunnel alone does not add authentication.** NoiseChat now supplies its own server-password gate and login cooldown, so strangers cannot use channel endpoints without that password. Keep the origin bound to localhost, configure the server password locally first, and share only the public HTTPS URL with clients. The public hostname still receives unauthenticated traffic, and a shared-password holder can create channels or use relay capacity.
 
-Protect the hostname with Cloudflare Access rather than publishing the open API by itself. For a CLI, Access's [service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/) authenticate requests using `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers with a Service Auth policy. **NoiseChat does not currently supply those headers or perform Cloudflare's browser login**, so Access-protected public-hostname use needs client authentication integration first. Those Access credentials would be separate from the end-to-end chat key; Cloudflare must never receive that key. A private VPN/network is another way to restrict who can reach the relay without publishing an open API.
+Cloudflare Access can provide an additional gate; see its [Access setup guidance](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/). For a CLI, Access's [service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/) authenticate requests using `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers with a Service Auth policy. **NoiseChat does not currently supply those headers or perform Cloudflare's browser login**, so that additional Access-protected setup needs client integration first. Cloudflare terminates public HTTPS and can see the server login password, access tokens, and routing metadata; message contents remain encrypted, and clients never send the chat key. A private VPN/network is another way to restrict who reaches the relay. Tunnel clients may share one source IP for the relay's login cooldown and POST rate limits.
 
 ## Message storage and retention
 
@@ -312,7 +347,7 @@ Each row in the `messages` table contains:
 | `digest` | A SHA-256 hash of the encrypted envelope, used to suppress duplicate submissions while retained. |
 | `envelope` | The encrypted packet, including its encrypted message/event type, sender, text, message ID, and timestamp. Join announcements are stored here too. |
 
-The database contains no raw chat keys, key-file passphrases, plaintext message bodies, plaintext display names, or local chat aliases. SQLite also keeps its indexes, sequence metadata, and a `deleted_rooms` table containing only blocked room IDs. Online presence, departure tokens, and the source-IP rate-limit cache are held only in memory; presence expires within 60 seconds of its last accepted refresh, and all presence is cleared on restart. The client does not write a plaintext transcript, although your terminal's scrollback or logging may retain displayed text.
+The database contains no raw chat keys, key-file passphrases, server access passwords or login tokens, plaintext message bodies, plaintext display names, or local chat aliases. SQLite also keeps its indexes, sequence metadata, and a `deleted_rooms` table containing only blocked room IDs. The separate `DATABASE.auth.json` file stores the salted server-password verifier. Login session hashes, cooldown counters, online presence, departure tokens, and source-IP rate-limit caches are held only in memory; presence expires within 60 seconds of its last accepted refresh, and all presence and login sessions are cleared on restart. The client does not write a plaintext transcript, although your terminal's scrollback or logging may retain displayed text.
 
 History retention is **based on packet counts, not time**:
 
@@ -349,7 +384,7 @@ Sending the same plaintext twice produces different ciphertext. Base64 merely ma
 
 ## What it does not protect
 
-HTTP still hides message contents from someone who lacks the key, but exposes room IDs, IP addresses, approximate sizes, timing, and traffic patterns. HTTP observers can also disrupt traffic or submit junk/replay packets. HTTPS protects the transport and authenticates the server, so use it when hosting publicly.
+HTTP still hides message contents from someone who lacks the chat key, but exposes the server login password, access tokens, room IDs, IP addresses, approximate sizes, timing, and traffic patterns. HTTP observers can steal relay access or disrupt traffic. HTTPS protects the transport and authenticates the server, so use it for remote connections. The relay password authorizes server use; it does not grant access to any channel's decrypted messages or make a shared-key holder a verified person.
 
 Online status exposes connection counts and presence timing to the relay. Each chat session uses a random private token to refresh or remove its presence; that token is sent over the transport but is never in the public roster or SQLite database. HTTP observers can capture it, so use HTTPS to protect presence updates too. The roster is a relay-reported view, not proof of a person's identity or guaranteed connectivity; a relay or key holder can replay or fabricate presence.
 
@@ -364,9 +399,18 @@ python -m unittest discover -s tests -v
 python -m compileall -q noisechat tests
 ```
 
-Tests cover randomized encryption, Unicode, authentication failures, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
+Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
-`pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, relay, client, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+`pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.0
+
+- Require a separate server access password and temporary login token for channel endpoints.
+- Save a salted PBKDF2-HMAC-SHA256 verifier locally; configure/reset passwords only before starting the server.
+- Match TL/TLS's five login attempts per source IP per minute, with cooldown messages and `Retry-After`.
+- Add hidden client password prompts and private password files for noninteractive commands.
+- Reauthenticate after session expiry or relay restart; stop background attempts on wrong passwords or login cooldowns.
+- Update setup, command reference, database storage, and Cloudflare Tunnel instructions.
 
 ## v0.3.0
 

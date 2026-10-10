@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .auth import ServerAccessError, password_bytes
 from .crypto import (MAX_ENVELOPE_CHARS, MAX_PRESENCE_PER_ROOM, PRESENCE_HEARTBEAT, PRESENCE_TTL,
                      ChannelDeletedError, NoiseChatError, decrypt_message, encrypt_event, encrypt_message, room_id)
 
@@ -21,7 +22,7 @@ class NoRedirects(HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, server: str, key: bytes):
+    def __init__(self, server: str, key: bytes, password: str | None = None):
         try:
             parsed = urlsplit(server)
             port = parsed.port
@@ -32,20 +33,34 @@ class Client:
                 or port == 0):
             raise NoiseChatError("Use a relay URL such as https://chat.example.com or http://HOST:PORT.")
         self.key = key
-        self.url = server.rstrip("/") + "/v1/rooms/" + room_id(key)
+        self.server = server.rstrip("/")
+        self.url = self.server + "/v1/rooms/" + room_id(key)
+        if password is not None:
+            password_bytes(password)
+        self.password = password
+        self.token = None
+        self.login_lock = threading.Lock()
         self.opener = build_opener(NoRedirects())
 
-    def request(self, method: str, query: dict | None = None, body: dict | None = None,
-                resource: str = "messages", timeout: int = 25) -> dict:
-        url = self.url + "/" + resource + ("?" + urlencode(query) if query else "")
+    def _request(self, url: str, method: str, body: dict | None, timeout: int,
+                 token: str | None = None, login: bool = False) -> dict:
         data = json.dumps(body).encode() if body is not None else None
-        request = Request(url, data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json"})
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if token is not None:
+            headers["Authorization"] = "Bearer " + token
+        request = Request(url, data=data, method=method, headers=headers)
         try:
             with self.opener.open(request, timeout=timeout) as response:
                 raw = response.read(1200001)
         except HTTPError as error:
             status = error.code
+            retry = error.headers.get("Retry-After", "60") if error.headers else "60"
             error.close()
+            if status == 401:
+                raise ServerAccessError("Incorrect server password." if login else "Server session expired or was revoked.") from None
+            if status == 429 and login:
+                seconds = int(retry) if retry.isascii() and retry.isdecimal() and len(retry) <= 3 else 60
+                raise ServerAccessError(f"Too many login attempts. Try again in {max(1, min(seconds, 60))} seconds.") from None
             if status == 410:
                 raise ChannelDeletedError() from None
             raise NoiseChatError(f"Relay returned HTTP {status}.") from None
@@ -60,6 +75,30 @@ class Client:
         if not isinstance(value, dict):
             raise NoiseChatError("Relay returned an invalid response.")
         return value
+
+    def authenticate(self, previous_token: str | None = None) -> str:
+        with self.login_lock:
+            if self.token is not None and self.token != previous_token:
+                return self.token
+            if self.password is None:
+                raise ServerAccessError("A server access password is required.")
+            value = self._request(self.server + "/v1/auth/login", "POST", {"password": self.password}, 5, login=True)
+            token = value.get("token")
+            if not isinstance(token, str) or len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
+                raise NoiseChatError("Relay returned an invalid server session.")
+            self.token = token
+            return token
+
+    def request(self, method: str, query: dict | None = None, body: dict | None = None,
+                resource: str = "messages", timeout: int = 25) -> dict:
+        url = self.url + "/" + resource + ("?" + urlencode(query) if query else "")
+        token = self.authenticate()
+        try:
+            return self._request(url, method, body, timeout, token)
+        except ServerAccessError:
+            # Relay restarts and expiry invalidate in-memory sessions. Reauthenticate once.
+            token = self.authenticate(previous_token=token)
+            return self._request(url, method, body, timeout, token)
 
     def send(self, sender: str, text: str) -> int:
         envelope = encrypt_message(self.key, sender, text)
@@ -131,7 +170,7 @@ class Presence:
                 if offline:
                     self.output("[Online status restored.]")
                 delay, offline = PRESENCE_HEARTBEAT, False
-            except ChannelDeletedError as error:
+            except (ChannelDeletedError, ServerAccessError) as error:
                 if not self.stop.is_set():
                     self.stop.set()
                     self.output(f"[{error} Press Enter to exit.]")
@@ -197,7 +236,7 @@ class Receiver:
                 if offline:
                     self.output("[Reconnected to relay.]")
                 offline = False
-            except ChannelDeletedError as error:
+            except (ChannelDeletedError, ServerAccessError) as error:
                 if not stop.is_set():
                     stop.set()
                     self.output(f"[{error} Press Enter to exit.]")

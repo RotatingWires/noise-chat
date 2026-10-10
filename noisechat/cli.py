@@ -2,7 +2,9 @@
 
 import argparse
 import getpass
+import os
 import sqlite3
+import stat
 import sys
 import threading
 import warnings
@@ -10,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import __version__
+from .auth import PasswordVerifier, password_bytes
 from .client import Client, Presence, Receiver, terminal_text
 from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
@@ -37,8 +40,41 @@ def read_passphrase(prompt: str) -> str:
             warnings.simplefilter("error", getpass.GetPassWarning)
             return getpass.getpass(prompt)
     except getpass.GetPassWarning:
-        raise NoiseChatError("Passphrase entry needs an interactive terminal with hidden input. "
-                             "Use an OS keyring for noninteractive commands.") from None
+        raise NoiseChatError("Secret entry needs an interactive terminal with hidden input. "
+                             "Use an OS keyring for chat keys or --password-file for server access in noninteractive commands.") from None
+
+
+def read_server_password(args) -> str:
+    if args.password_file is None:
+        password = read_passphrase("Server access password: ")
+    else:
+        descriptor = os.open(args.password_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and info.st_mode & 0o077):
+                raise NoiseChatError("Use a regular server password file accessible only to its owner (chmod 600 on Unix).")
+            raw = stream.read(1027)
+        if len(raw) > 1026:
+            raise NoiseChatError("Server password file is too large.")
+        try:
+            password = raw.decode("utf-8").removesuffix("\n").removesuffix("\r")
+        except UnicodeError:
+            raise NoiseChatError("Server password file must contain UTF-8 text.") from None
+    password_bytes(password)
+    return password
+
+
+def server_verifier(args) -> PasswordVerifier:
+    path = args.auth_file or args.database.with_name(args.database.name + ".auth.json")
+    if path.exists() and not args.reset_password:
+        return PasswordVerifier.load(path)
+    password = read_server_password(args)
+    if args.password_file is None and password != read_passphrase("Confirm server access password: "):
+        raise NoiseChatError("Server passwords do not match.")
+    verifier = PasswordVerifier.create(password)
+    verifier.save(path, replace=args.reset_password)
+    print("Server password configured. Authentication file:", path)
+    return verifier
 
 
 def new_passphrase() -> str:
@@ -108,7 +144,7 @@ def key_command(args) -> None:
 
 def chat_command(args) -> None:
     key = load_key(args)
-    client = Client(args.server, key)
+    client = Client(args.server, key, read_server_password(args))
     # Reject a bad name before starting the receiver, without transmitting anything.
     validate_sender(args.name)
     lock = threading.Lock()
@@ -170,12 +206,16 @@ def users_command(args) -> None:
         raise NoiseChatError("--key-file supports one channel at a time.")
     channels = []
     seen = set()
+    password = read_server_password(args)
     for channel in args.chats:
         args.chat = channel
         key = load_key(args)
         identity = room_id(key)
         if identity not in seen:
-            channels.append((channel, Client(args.server, key)))
+            client = Client(args.server, key, password)
+            if channels:
+                client.token = channels[0][1].authenticate()
+            channels.append((channel, client))
             seen.add(identity)
     print_users(channels)
 
@@ -188,6 +228,9 @@ def parser() -> argparse.ArgumentParser:
     server.add_argument("--urls", default=DEFAULT_RELAY_URL, metavar="HTTP_URL",
                         help="one HTTP listen URL, including IP/host and port (default: %(default)s)")
     server.add_argument("--database", type=Path, default=Path("relay.sqlite3"))
+    server.add_argument("--auth-file", type=Path, metavar="FILE", help="password hash file (default: DATABASE.auth.json)")
+    server.add_argument("--reset-password", action="store_true", help="set a new server password before starting the relay")
+    server.add_argument("--password-file", type=Path, metavar="FILE", help="read the server password from a private file for setup/reset")
 
     key = commands.add_parser("key", help="create, import, export, inspect, or remove chat keys")
     actions = key.add_subparsers(dest="key_action", required=True)
@@ -212,6 +255,7 @@ def parser() -> argparse.ArgumentParser:
     users.add_argument("chats", nargs="+", metavar="CHAT", help="local names of channels to list")
     users.add_argument("--server", required=True, help="relay URL, including http:// or https://")
     users.add_argument("--key-file", type=Path, help="unlock an encrypted key file for a single channel")
+    users.add_argument("--password-file", type=Path, metavar="FILE", help="read the server access password from a private file")
 
     for name, help_text in [("chat", "send and receive interactively"), ("send", "send one message"),
                             ("listen", "receive messages"), ("encrypt", "turn text into ciphertext offline"),
@@ -221,6 +265,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--key-file", type=Path, help="unlock an encrypted key file instead of using the OS keyring")
         if name in {"chat", "send", "listen"}:
             command.add_argument("--server", required=True, help="relay URL, including http:// or https://")
+            command.add_argument("--password-file", type=Path, metavar="FILE", help="read the server access password from a private file")
         if name in {"chat", "send", "encrypt"}:
             command.add_argument("--name", required=True, help="display name (encrypted along with your message)")
         if name in {"send", "encrypt"}:
@@ -238,7 +283,7 @@ def main(argv=None) -> int:
             host, port = listen_address(args.urls)
             # Server setup does not touch the OS keyring or load a chat key.
             from .relay import serve
-            serve(host, port, args.database)
+            serve(host, port, args.database, server_verifier(args))
         elif args.command == "key":
             key_command(args)
         elif args.command == "chat":
@@ -247,12 +292,15 @@ def main(argv=None) -> int:
             users_command(args)
         else:
             key = load_key(args)
+            client = Client(args.server, key, read_server_password(args)) if args.command in {"send", "listen"} else None
+            if client is not None:
+                client.authenticate()
             if args.command in {"send", "encrypt"}:
                 text = read_text(args.stdin)
                 if args.command == "encrypt":
                     print(encrypt_message(key, args.name, text))
                 else:
-                    receipt = Client(args.server, key).send(args.name, text)
+                    receipt = client.send(args.name, text)
                     print(f"Accepted by relay (sequence {receipt}). This is not a read receipt.")
             elif args.command == "decrypt":
                 envelope = input("Ciphertext: ").strip()
@@ -261,7 +309,7 @@ def main(argv=None) -> int:
             elif args.command == "listen":
                 if args.after < 0 or args.after >= 2**63:
                     raise NoiseChatError("--after must be a nonnegative relay sequence number.")
-                receiver = Receiver(Client(args.server, key))
+                receiver = Receiver(client)
                 receiver.cursor = args.after
                 if args.once:
                     receiver.receive(wait=0)

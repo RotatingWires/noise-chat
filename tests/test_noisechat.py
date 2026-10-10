@@ -15,11 +15,15 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
 from noisechat import cli
+from noisechat.auth import PasswordVerifier, RelayAccess, ServerAccessError, SESSION_SECONDS
 from noisechat.client import Client, Presence, Receiver, terminal_text
 from noisechat.crypto import (ChannelDeletedError, NoiseChatError, b64decode, b64encode, decrypt_key_file,
                               decrypt_message, encrypt_event, encrypt_key_file, encrypt_message, generate_key, room_id)
 from noisechat.keys import KeyStore, native_backend, read_key_file, write_key_file
 from noisechat.relay import RelayHandler, RelayStore, RelayServer, console
+
+SERVER_PASSWORD = "correct server password words"
+SERVER_VERIFIER = PasswordVerifier.create(SERVER_PASSWORD)
 
 
 class CryptoTests(unittest.TestCase):
@@ -172,12 +176,15 @@ class WireSocket:
 
 class InProcessHTTP:
     def __init__(self, store):
-        self.server = SimpleNamespace(store=store, allow_post=lambda address: True)
+        self.server = SimpleNamespace(store=store, access=RelayAccess(SERVER_VERIFIER), allow_post=lambda address: True)
+        self.token = self.server.access.login(SERVER_PASSWORD)
         self.requests = []
 
-    def raw(self, data):
+    def raw(self, data, authenticated=True, address="127.0.0.1"):
+        if authenticated and b"Authorization:" not in data:
+            data = data.replace(b"\r\n\r\n", f"\r\nAuthorization: Bearer {self.token}\r\n\r\n".encode(), 1)
         socket = WireSocket(data)
-        RelayHandler(socket, ("127.0.0.1", 12345), self.server)
+        RelayHandler(socket, (address, 12345), self.server)
         response = http.client.HTTPResponse(WireSocket(bytes(socket.output)))
         response.begin()
         return response
@@ -189,7 +196,7 @@ class InProcessHTTP:
         headers = {**request.headers, "Host": "relay.test", "Content-Length": str(len(body))}
         raw = (f"{request.method} {target} HTTP/1.0\r\n" + "".join(f"{key}: {value}\r\n" for key,value in headers.items()) + "\r\n").encode() + body
         self.requests.append(raw)
-        response = self.raw(raw)
+        response = self.raw(raw, authenticated=False)
         if response.status >= 400:
             raise HTTPError(request.full_url, response.status, "", response.headers, response)
         return response
@@ -203,9 +210,12 @@ class RelayTests(unittest.TestCase):
         self.wire = InProcessHTTP(self.store)
         self.key = generate_key()
         self.alice, self.bob = self.client(self.key), self.client(self.key)
+        password_prompt = patch("noisechat.cli.read_server_password", return_value=SERVER_PASSWORD)
+        password_prompt.start()
+        self.addCleanup(password_prompt.stop)
 
     def client(self, key):
-        client = Client("http://relay.test", key)
+        client = Client("http://relay.test", key, SERVER_PASSWORD)
         client.opener = self.wire
         return client
 
@@ -332,7 +342,8 @@ class RelayTests(unittest.TestCase):
             KeyStore().put("friends", self.key)
             KeyStore().put("same-room", self.key)
             KeyStore().put("work", second_key)
-            def client_for(server, key):
+            def client_for(server, key, password):
+                self.assertEqual(password, SERVER_PASSWORD)
                 return self.client(key)
             with patch("noisechat.cli.Client", side_effect=client_for), contextlib.redirect_stdout(output):
                 self.assertEqual(cli.main(["users", "friends", "same-room", "work", "--server", "http://relay.test"]), 0)
@@ -584,17 +595,251 @@ class RelayTests(unittest.TestCase):
 
     def test_native_loopback_when_host_allows_sockets(self):
         try:
-            server=RelayServer(("127.0.0.1",0),self.store)
+            server=RelayServer(("127.0.0.1",0),self.store,SERVER_VERIFIER)
         except PermissionError:
             self.skipTest("This execution sandbox prohibits network sockets; HTTP serialization is covered in process.")
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
-            alice=Client(f"http://127.0.0.1:{server.server_port}",self.key)
-            bob=Client(f"http://127.0.0.1:{server.server_port}",self.key)
+            alice=Client(f"http://127.0.0.1:{server.server_port}",self.key,SERVER_PASSWORD)
+            bob=Client(f"http://127.0.0.1:{server.server_port}",self.key,SERVER_PASSWORD)
             alice.send("Alice","network test")
             self.assertEqual(decrypt_message(self.key,bob.poll(0,0)[0]["envelope"])["text"],"network test")
         finally:
             server.shutdown();server.server_close();thread.join(timeout=2)
+
+
+class AccessTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name)
+        self.store = RelayStore(self.path / "relay.sqlite3")
+        self.wire = InProcessHTTP(self.store)
+        self.key = generate_key()
+        self.room = room_id(self.key)
+
+    def tearDown(self):
+        self.store.close()
+        self.directory.cleanup()
+
+    def client(self, password=SERVER_PASSWORD):
+        client = Client("http://relay.test", self.key, password)
+        client.opener = self.wire
+        return client
+
+    def login(self, password, address="127.0.0.1", extra_headers=""):
+        body = json.dumps({"password": password}).encode()
+        request = ("POST /v1/auth/login HTTP/1.0\r\nContent-Type: application/json\r\n"
+                   f"Content-Length: {len(body)}\r\n{extra_headers}\r\n").encode() + body
+        return self.wire.raw(request, authenticated=False, address=address)
+
+    def test_password_and_session_gate_all_channel_operations(self):
+        envelope = encrypt_message(self.key, "Alice", "private history")
+        self.store.post(self.room, envelope)
+        for resource in ("messages", "presence"):
+            for method in ("GET", "POST"):
+                with self.subTest(method=method, resource=resource):
+                    response = self.wire.raw(f"{method} /v1/rooms/{self.room}/{resource} HTTP/1.0\r\n\r\n".encode(), authenticated=False)
+                    self.assertEqual(response.status, 401)
+                    self.assertNotIn(envelope.encode(), response.read())
+        self.assertEqual(len(self.store.poll(self.room, 0)), 1)
+        self.assertEqual(self.store.presence, {})
+        other = room_id(generate_key())
+        response = self.wire.raw(f"POST /v1/rooms/{other}/messages HTTP/1.0\r\n\r\n".encode(), authenticated=False)
+        self.assertEqual(response.status, 401)
+        self.assertEqual(len(self.store.channels()), 1)
+        self.assertEqual(self.wire.raw(b"GET /health HTTP/1.0\r\n\r\n", authenticated=False).status, 200)
+        with self.assertRaisesRegex(ServerAccessError, "Incorrect server password"):
+            self.client("wrong password words").poll(0, 0)
+        alice, bob = self.client(), self.client()
+        alice.connect("a" * 64, "Alice")
+        alice.send("Alice", "authenticated message")
+        self.assertEqual([user["sender"] for user in bob.users()], ["Alice"])
+        self.assertEqual(decrypt_message(self.key, bob.poll(0, 0)[-1]["envelope"])["text"], "authenticated message")
+        alice.disconnect("a" * 64)
+        self.assertEqual(bob.users(), [])
+        self.assertNotIn(SERVER_PASSWORD.encode(), self.store.connection.execute("SELECT envelope FROM messages").fetchone()[0].encode())
+
+    def test_login_cooldown_has_retry_after_and_does_not_extend_on_retries(self):
+        with patch("noisechat.auth.time.monotonic", return_value=100):
+            for _ in range(5):
+                self.assertEqual(self.login("incorrect password words").status, 401)
+            response = self.login(SERVER_PASSWORD, extra_headers="X-Forwarded-For: 192.0.2.1\r\n")
+            self.assertEqual(response.status, 429)
+            self.assertEqual(response.headers["Retry-After"], "60")
+            self.assertEqual(json.loads(response.read())["retry_after"], 60)
+            self.assertEqual(self.login(SERVER_PASSWORD, address="192.0.2.2").status, 200)
+        with patch("noisechat.auth.time.monotonic", return_value=159.1):
+            response = self.login(SERVER_PASSWORD)
+            self.assertEqual(response.status, 429)
+            self.assertEqual(response.headers["Retry-After"], "1")
+        with patch("noisechat.auth.time.monotonic", return_value=160):
+            self.assertEqual(self.login(SERVER_PASSWORD).status, 200)
+
+    def test_malformed_logins_count_toward_cooldown(self):
+        request = b"POST /v1/auth/login HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+        for _ in range(5):
+            self.assertEqual(self.wire.raw(request, authenticated=False).status, 400)
+        self.assertEqual(self.login(SERVER_PASSWORD).status, 429)
+        self.assertEqual(len(self.wire.server.access.sessions), 1)
+
+    def test_sessions_are_hashed_bounded_expire_and_require_a_single_header(self):
+        access = RelayAccess(SERVER_VERIFIER)
+        with patch("noisechat.auth.time.monotonic", return_value=100):
+            token = access.login(SERVER_PASSWORD)
+            self.assertTrue(access.authorized(["Bearer " + token]))
+            self.assertNotIn(token, access.sessions)
+            for headers in ([], ["Bearer " + "a" * 64], ["Basic abc"], ["Bearer " + token] * 2):
+                self.assertFalse(access.authorized(headers))
+            with patch("noisechat.auth.MAX_SESSIONS", 1), self.assertRaisesRegex(NoiseChatError, "session capacity"):
+                access.login(SERVER_PASSWORD)
+        with patch("noisechat.auth.time.monotonic", return_value=100 + SESSION_SECONDS):
+            self.assertFalse(access.authorized(["Bearer " + token]))
+            self.assertEqual(access.sessions, {})
+        for address in range(1100):
+            access.login_attempt(str(address))
+        self.assertLessEqual(len(access.attempts), 1024)
+
+    def test_client_reauthenticates_after_restart_and_stops_after_password_change(self):
+        client = self.client()
+        client.send("Alice", "before restart")
+        old_token = client.token
+        self.wire.server.access = RelayAccess(SERVER_VERIFIER)
+        self.assertEqual(len(client.poll(0, 0)), 1)
+        self.assertNotEqual(client.token, old_token)
+        changed = PasswordVerifier.create("different server password words")
+        self.wire.server.access = RelayAccess(changed)
+        with self.assertRaisesRegex(ServerAccessError, "Incorrect server password"):
+            client.poll(0, 0)
+        stop, output = threading.Event(), []
+        Receiver(client, output.append).listen(stop)
+        self.assertTrue(stop.is_set())
+        self.assertNotIn("Retrying", " ".join(output))
+        stop, output = threading.Event(), []
+        presence = Presence(client, "Alice", output.append, stop)
+        with patch("noisechat.client.PRESENCE_HEARTBEAT", 0):
+            presence.maintain()
+        self.assertTrue(stop.is_set())
+        self.assertNotIn("Retrying", " ".join(output))
+
+    def test_client_reports_cooldown_without_repeated_background_attempts(self):
+        for _ in range(5):
+            self.login("incorrect password words")
+        client = self.client()
+        with self.assertRaisesRegex(ServerAccessError, "Try again in .* seconds"):
+            client.poll(0, 0)
+        self.assertEqual(len(self.wire.requests), 1)
+
+    def test_client_reuses_login_and_never_forwards_credentials_on_redirect(self):
+        client = self.client()
+        client.poll(0, 0)
+        client.users()
+        self.assertEqual(sum(b"/v1/auth/login " in request for request in self.wire.requests), 1)
+        room_requests = [request for request in self.wire.requests if b"/v1/rooms/" in request]
+        self.assertTrue(all(b"Authorization: Bearer " in request for request in room_requests))
+        self.assertTrue(all(SERVER_PASSWORD.encode() not in request for request in room_requests))
+        from noisechat.client import NoRedirects
+        self.assertIsNone(NoRedirects().redirect_request(None, None, 302, "", {}, "https://other.test"))
+
+    def test_first_run_password_is_hashed_and_restart_does_not_prompt(self):
+        auth_file = self.path / "relay.sqlite3.auth.json"
+        args = ["run", "--database", str(self.path / "relay.sqlite3")]
+        with patch("noisechat.relay.serve") as serve, patch("noisechat.cli.getpass.getpass", return_value=SERVER_PASSWORD) as prompt, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(args), 0)
+            self.assertEqual(prompt.call_count, 2)
+            self.assertTrue(serve.call_args.args[-1].verify(SERVER_PASSWORD))
+            prompt.reset_mock()
+            self.assertEqual(cli.main(args), 0)
+            prompt.assert_not_called()
+        data = auth_file.read_bytes()
+        self.assertNotIn(SERVER_PASSWORD.encode(), data)
+        self.assertEqual(json.loads(data)["iterations"], 600000)
+        if os.name != "nt":
+            self.assertEqual(auth_file.stat().st_mode & 0o777, 0o600)
+
+    def test_local_password_reset_and_failed_reset_preserve_previous_verifier(self):
+        auth_file = self.path / "relay.sqlite3.auth.json"
+        SERVER_VERIFIER.save(auth_file)
+        args = cli.parser().parse_args(["run", "--database", str(self.path / "relay.sqlite3"), "--reset-password"])
+        with patch("noisechat.cli.getpass.getpass", return_value="new server password words"), contextlib.redirect_stdout(io.StringIO()):
+            changed = cli.server_verifier(args)
+        self.assertTrue(changed.verify("new server password words"))
+        self.assertFalse(PasswordVerifier.load(auth_file).verify(SERVER_PASSWORD))
+        before = auth_file.read_bytes()
+        with patch("noisechat.auth.os.replace", side_effect=OSError("interrupted")), self.assertRaises(OSError):
+            SERVER_VERIFIER.save(auth_file, replace=True)
+        self.assertEqual(auth_file.read_bytes(), before)
+        self.assertEqual(list(self.path.glob(".noisechat-auth-*")), [])
+
+    def test_private_password_files_support_server_setup_and_all_client_commands(self):
+        password_file = self.path / "server.noise-password"
+        password_file.write_bytes(SERVER_PASSWORD.encode() + b"\r\n")
+        password_file.chmod(0o600)
+        args = cli.parser().parse_args(["run", "--database", str(self.path / "relay.sqlite3"), "--password-file", str(password_file)])
+        with patch("noisechat.cli.getpass.getpass", side_effect=AssertionError("No hidden prompt needed")), contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(cli.server_verifier(args).verify(SERVER_PASSWORD))
+            self.assertEqual(cli.read_server_password(args), SERVER_PASSWORD)
+        for command in (["chat", "friends", "--name", "Alice"], ["send", "friends", "--name", "Alice"], ["listen", "friends"], ["users", "friends"]):
+            parsed = cli.parser().parse_args(command + ["--server", "http://relay.test", "--password-file", str(password_file)])
+            self.assertEqual(cli.read_server_password(parsed), SERVER_PASSWORD)
+        if os.name != "nt":
+            password_file.chmod(0o644)
+            with self.assertRaisesRegex(NoiseChatError, "only to its owner"):
+                cli.read_server_password(args)
+            password_file.chmod(0o600)
+        for data in (b"", b"two\nlines", b"x" * 1027, b"\xff"):
+            password_file.write_bytes(data)
+            with self.assertRaises(NoiseChatError):
+                cli.read_server_password(args)
+
+    def test_cli_password_file_send_listen_chat_and_users_use_real_authentication(self):
+        password_file = self.path / "server.noise-password"
+        password_file.write_text(SERVER_PASSWORD)
+        password_file.chmod(0o600)
+        def make_client(server, key, password):
+            client = Client(server, key, password)
+            client.opener = self.wire
+            return client
+        common = ["--server", "http://relay.test", "--password-file", str(password_file)]
+        output = io.StringIO()
+        with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", side_effect=make_client), patch("noisechat.cli.getpass.getpass", side_effect=AssertionError("Password file should avoid prompts")), contextlib.redirect_stdout(output):
+            with patch("noisechat.cli.sys.stdin", io.TextIOWrapper(io.BytesIO(b"piped message\n"))):
+                self.assertEqual(cli.main(["send", "friends", "--name", "Alice", "--stdin"] + common), 0)
+            self.assertEqual(cli.main(["listen", "friends", "--once"] + common), 0)
+            self.assertIn("Alice: piped message", output.getvalue())
+            with patch("builtins.input", return_value="/quit"):
+                self.assertEqual(cli.main(["chat", "friends", "--name", "Alice"] + common), 0)
+            self.assertEqual(cli.main(["users", "friends"] + common), 0)
+        self.assertEqual(self.store.presence, {})
+
+    def test_multi_channel_users_uses_one_login_for_more_than_five_channels(self):
+        keys = {f"channel{i}": generate_key() for i in range(8)}
+        def make_client(server, key, password):
+            client = Client(server, key, password)
+            client.opener = self.wire
+            return client
+        with patch("noisechat.cli.load_key", side_effect=lambda args: keys[args.chat]), patch("noisechat.cli.Client", side_effect=make_client), patch("noisechat.cli.getpass.getpass", return_value=SERVER_PASSWORD) as prompt, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["users", *keys, "--server", "http://relay.test"]), 0)
+            prompt.assert_called_once()
+        self.assertEqual(sum(b"/v1/auth/login " in request for request in self.wire.requests), 1)
+
+    def test_cli_wrong_password_fails_before_reading_or_sending_message_text(self):
+        client = self.client("incorrect password words")
+        with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", return_value=client), patch("noisechat.cli.getpass.getpass", return_value="incorrect password words"), patch("noisechat.cli.read_text", side_effect=AssertionError("Do not read text after failed login")), contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(cli.main(["send", "friends", "--server", "http://relay.test", "--name", "Alice"]), 1)
+        self.assertIn("Incorrect server password", errors.getvalue())
+        self.assertEqual(self.store.channels(), [])
+
+    def test_invalid_setup_does_not_start_relay_or_replace_authentication(self):
+        args = ["run", "--database", str(self.path / "relay.sqlite3")]
+        for replies in (["short", "short"], [SERVER_PASSWORD, "mismatch"]):
+            with patch("noisechat.cli.getpass.getpass", side_effect=replies), patch("noisechat.relay.serve") as serve, contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(args), 1)
+                serve.assert_not_called()
+        auth_file = self.path / "relay.sqlite3.auth.json"
+        auth_file.write_text('{"unexpected":"data"}')
+        with patch("noisechat.cli.getpass.getpass", side_effect=AssertionError("Do not silently reset")), patch("noisechat.relay.serve") as serve, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(args), 1)
+            serve.assert_not_called()
 
 
 class RunTests(unittest.TestCase):
@@ -605,7 +850,7 @@ class RunTests(unittest.TestCase):
                 server = SimpleNamespace(server_port=8713, shutdown=stopped.set, server_close=lambda: None,
                                          serve_forever=lambda: stopped.wait(1) if interactive else None)
                 output = io.StringIO()
-                with patch("noisechat.relay.RelayServer", return_value=server), patch("noisechat.relay.sys.stdin.isatty", return_value=interactive), patch("builtins.input", side_effect=["help", "quit"]) as console_input, contextlib.redirect_stdout(output):
+                with patch("noisechat.cli.server_verifier", return_value=SERVER_VERIFIER), patch("noisechat.relay.RelayServer", return_value=server), patch("noisechat.relay.sys.stdin.isatty", return_value=interactive), patch("builtins.input", side_effect=["help", "quit"]) as console_input, contextlib.redirect_stdout(output):
                     self.assertEqual(cli.main(["run", "--database", str(Path(directory) / "relay.sqlite3")]), 0)
                 if interactive:
                     self.assertTrue(stopped.is_set())
@@ -616,15 +861,15 @@ class RunTests(unittest.TestCase):
                     self.assertNotIn("Server console", output.getvalue())
 
     def test_default_and_custom_listen_urls_start_relay_without_client_keys(self):
-        with patch("noisechat.relay.serve") as serve, patch("noisechat.cli.KeyStore", side_effect=AssertionError("A relay must not load client keys")):
+        with patch("noisechat.cli.server_verifier", return_value=SERVER_VERIFIER), patch("noisechat.relay.serve") as serve, patch("noisechat.cli.KeyStore", side_effect=AssertionError("A relay must not load client keys")):
             self.assertEqual(cli.main(["run"]), 0)
-            serve.assert_called_with("127.0.0.1", 8713, Path("relay.sqlite3"))
+            serve.assert_called_with("127.0.0.1", 8713, Path("relay.sqlite3"), SERVER_VERIFIER)
             self.assertEqual(cli.main(["run", "--urls", "http://0.0.0.0:9000", "--database", "custom.sqlite3"]), 0)
-            serve.assert_called_with("0.0.0.0", 9000, Path("custom.sqlite3"))
+            serve.assert_called_with("0.0.0.0", 9000, Path("custom.sqlite3"), SERVER_VERIFIER)
             self.assertEqual(cli.main(["run", "--urls", "http://localhost:0/"]), 0)
-            serve.assert_called_with("localhost", 0, Path("relay.sqlite3"))
+            serve.assert_called_with("localhost", 0, Path("relay.sqlite3"), SERVER_VERIFIER)
             self.assertEqual(cli.main(["run", "--urls", "http://[::1]:8713"]), 0)
-            serve.assert_called_with("::1", 8713, Path("relay.sqlite3"))
+            serve.assert_called_with("::1", 8713, Path("relay.sqlite3"), SERVER_VERIFIER)
 
     def test_invalid_listen_urls_do_not_start_server(self):
         invalid = ["", "localhost:8713", "http://localhost", "https://localhost:8713",
@@ -657,7 +902,7 @@ class ClientTests(unittest.TestCase):
                 client.users()
 
     def test_transport_errors_are_reported_without_response_content(self):
-        client=Client("http://relay.test",generate_key())
+        client=Client("http://relay.test",generate_key(),SERVER_PASSWORD)
         with patch.object(client.opener,"open",side_effect=http.client.BadStatusLine("untrusted response text")):
             with self.assertRaisesRegex(NoiseChatError,"Could not reach the relay") as caught:
                 client.poll(0,0)
