@@ -7,11 +7,28 @@ import sys
 import threading
 import warnings
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import __version__
 from .client import Client, Presence, Receiver, terminal_text
 from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
+
+DEFAULT_RELAY_URL = "http://127.0.0.1:8713"
+
+
+def listen_address(url: str) -> tuple[str, int]:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        raise NoiseChatError("Use one HTTP listen URL with an explicit port, such as " + DEFAULT_RELAY_URL + ".") from None
+    if (any(char.isspace() for char in url) or parsed.scheme != "http" or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment
+            or parsed.path not in {"", "/"} or port is None):
+        raise NoiseChatError("Use one HTTP listen URL with an explicit port, such as " + DEFAULT_RELAY_URL +
+                             ". For HTTPS, use a reverse proxy.")
+    return parsed.hostname, port
 
 
 def read_passphrase(prompt: str) -> str:
@@ -165,9 +182,9 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="noisechat", description="Encrypted CLI chat; only clients hold chat keys.")
     result.add_argument("--version", action="version", version=f"NoiseChat {__version__}")
     commands = result.add_subparsers(dest="command", required=True)
-    server = commands.add_parser("serve", help="run the ciphertext-only relay")
-    server.add_argument("--host", default="127.0.0.1")
-    server.add_argument("--port", type=int, default=8720)
+    server = commands.add_parser("run", help="run the ciphertext-only relay")
+    server.add_argument("--urls", default=DEFAULT_RELAY_URL, metavar="HTTP_URL",
+                        help="one HTTP listen URL, including IP/host and port (default: %(default)s)")
     server.add_argument("--database", type=Path, default=Path("relay.sqlite3"))
 
     key = commands.add_parser("key", help="create, import, export, inspect, or remove chat keys")
@@ -215,12 +232,11 @@ def parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.command == "serve":
-            if not 0 <= args.port <= 65535:
-                raise NoiseChatError("Port must be between 0 and 65535.")
+        if args.command == "run":
+            host, port = listen_address(args.urls)
             # Server setup does not touch the OS keyring or load a chat key.
             from .relay import serve
-            serve(args.host, args.port, args.database)
+            serve(host, port, args.database)
         elif args.command == "key":
             key_command(args)
         elif args.command == "chat":

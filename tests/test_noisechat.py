@@ -489,6 +489,32 @@ class RelayTests(unittest.TestCase):
             server.shutdown();server.server_close();thread.join(timeout=2)
 
 
+class RunTests(unittest.TestCase):
+    def test_default_and_custom_listen_urls_start_relay_without_client_keys(self):
+        with patch("noisechat.relay.serve") as serve, patch("noisechat.cli.KeyStore", side_effect=AssertionError("A relay must not load client keys")):
+            self.assertEqual(cli.main(["run"]), 0)
+            serve.assert_called_with("127.0.0.1", 8713, Path("relay.sqlite3"))
+            self.assertEqual(cli.main(["run", "--urls", "http://0.0.0.0:9000", "--database", "custom.sqlite3"]), 0)
+            serve.assert_called_with("0.0.0.0", 9000, Path("custom.sqlite3"))
+            self.assertEqual(cli.main(["run", "--urls", "http://localhost:0/"]), 0)
+            serve.assert_called_with("localhost", 0, Path("relay.sqlite3"))
+            self.assertEqual(cli.main(["run", "--urls", "http://[::1]:8713"]), 0)
+            serve.assert_called_with("::1", 8713, Path("relay.sqlite3"))
+
+    def test_invalid_listen_urls_do_not_start_server(self):
+        invalid = ["", "localhost:8713", "http://localhost", "https://localhost:8713",
+                   "http://localhost:-1", "http://localhost:65536", "http://localhost:abc",
+                   "http://user:secret@localhost:8713", "http://localhost:8713/api",
+                   "http://localhost:8713?x=1", "http://localhost:8713#fragment",
+                   "http://localhost:8713 http://localhost:9000", "http://[::1:8713"]
+        with patch("noisechat.relay.serve") as serve:
+            for url in invalid:
+                with self.subTest(url=url), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(cli.main(["run", "--urls", url]), 1)
+                self.assertIn("HTTP listen URL", errors.getvalue())
+            serve.assert_not_called()
+
+
 class ClientTests(unittest.TestCase):
     def test_roster_validation_replay_suppression_and_terminal_escaping(self):
         key = generate_key()
