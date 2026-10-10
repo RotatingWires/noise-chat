@@ -16,6 +16,7 @@ from .auth import PasswordVerifier, password_bytes
 from .client import Client, Presence, Receiver, terminal_text
 from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
+from .terminal import chat_input
 
 DEFAULT_RELAY_URL = "http://127.0.0.1:8713"
 
@@ -44,9 +45,9 @@ def read_passphrase(prompt: str) -> str:
                              "Use an OS keyring for chat keys or --password-file for server access in noninteractive commands.") from None
 
 
-def read_server_password(args) -> str:
+def read_server_password(args, prompt: str = "Server access password: ") -> str:
     if args.password_file is None:
-        password = read_passphrase("Server access password: ")
+        password = read_passphrase(prompt)
     else:
         descriptor = os.open(args.password_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(descriptor, "rb") as stream:
@@ -68,7 +69,7 @@ def server_verifier(args) -> PasswordVerifier:
     path = args.auth_file or args.database.with_name(args.database.name + ".auth.json")
     if path.exists() and not args.reset_password:
         return PasswordVerifier.load(path)
-    password = read_server_password(args)
+    password = read_server_password(args, "Enter a server password (12+ characters): ")
     if args.password_file is None and password != read_passphrase("Confirm server access password: "):
         raise NoiseChatError("Server passwords do not match.")
     verifier = PasswordVerifier.create(password)
@@ -153,40 +154,41 @@ def chat_command(args) -> None:
         with lock:
             print(text, flush=True)
 
-    receiver = Receiver(client, output)
-    stop = threading.Event()
-    presence = Presence(client, args.name, output, stop)
-    thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)
-    presence.start()
-    print(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter. /users lists users; /quit exits.")
-    print("Names are chosen by key holders, not verified identities.")
-    thread.start()
-    try:
-        while not stop.is_set():
-            text = input("> ")
-            if stop.is_set():
-                break
-            if text == "/quit":
-                break
-            if text == "/users":
+    with chat_input() as read_message:
+        receiver = Receiver(client, output)
+        stop = threading.Event()
+        presence = Presence(client, args.name, output, stop)
+        thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)
+        presence.start()
+        print(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter. /users lists users; /quit exits.")
+        print("Names are chosen by key holders, not verified identities.")
+        thread.start()
+        try:
+            while not stop.is_set():
+                text = read_message("> ")
+                if stop.is_set():
+                    break
+                if text == "/quit":
+                    break
+                if text == "/users":
+                    try:
+                        print_users([(args.chat, client)], output)
+                    except NoiseChatError as error:
+                        output(f"[Could not list users: {error}]")
+                    continue
+                if not text.strip():
+                    continue
                 try:
-                    print_users([(args.chat, client)], output)
+                    client.send(args.name, text)
                 except NoiseChatError as error:
-                    output(f"[Could not list users: {error}]")
-                continue
-            if not text.strip():
-                continue
-            try:
-                client.send(args.name, text)
-            except NoiseChatError as error:
-                output(f"[Send not confirmed: {error}]")
-    except (KeyboardInterrupt, EOFError):
-        pass
-    finally:
-        stop.set()
-        presence.close()
-        # A receiver may be in a bounded long poll; it doesn't block CLI exit.
-        thread.join(timeout=0.2)
+                    output(f"[Send not confirmed: {error}]")
+        except (KeyboardInterrupt, EOFError):
+            pass
+        finally:
+            stop.set()
+            presence.close()
+            # A receiver may be in a bounded long poll; it doesn't block CLI exit.
+            thread.join(timeout=0.2)
 
 
 def print_users(channels, output=print) -> None:
