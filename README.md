@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.0
+# NoiseChat v0.4.1
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -35,11 +35,13 @@ On first run, the relay prompts for a server password of at least 12 characters 
 
 Clients prompt for the server password once per command, also with input hidden. Login uses `POST /v1/auth/login`; a successful login returns a random token sent in the `Authorization: Bearer` header on channel requests. Tokens are held in client memory and stored only as hashes in server memory. They expire after 12 hours, and a relay restart invalidates them. Clients log in again automatically after expiry or a restart while keeping their in-memory message cursor. An incorrect password or login cooldown stops background retries. `/health` remains public and exposes only basic health and version information.
 
-Like TL and TLS, login permits **five attempts per source IP in a one-minute window**, including successful and malformed attempts. Further attempts receive HTTP 429 with `Retry-After` and the CLI reports how many seconds to wait. Retrying during the cooldown does not extend it. Normal authenticated polling and messages do not count as logins. Attempts and sessions are bounded and kept only in memory, so restarting the relay clears the cooldown. Behind a reverse proxy or Cloudflare Tunnel, clients can share the proxy's IP allowance; arbitrary forwarding headers do not bypass it. Existing message rate limits apply separately.
+Like TL and TLS, login permits **five attempts per source IP in a one-minute window**, including successful and malformed attempts. Further attempts receive HTTP 429 with `Retry-After` and the CLI reports how many seconds to wait. Retrying during the cooldown does not extend it. Normal authenticated polling and messages do not count as logins. Attempts and sessions are bounded and kept only in memory, so restarting the relay clears the cooldown. Direct mode uses the TCP peer's IP and ignores forwarded IP headers. With `run --cloudflare-tunnel`, a trusted local connector's `CF-Connecting-IP` identifies each visitor for both login and message limits; see the setup below. Existing message rate limits apply separately.
 
 With the default `http://127.0.0.1:8713` listener, only programs on the server machine can reach the relay directly. With `--urls "http://0.0.0.0:8713"`, people on the LAN can contact its listener if the firewall allows it, but need the server password to use channel endpoints. Anyone you give that password can start their own channels with their own chat keys. Your friends still need your channel's key to read its messages or produce messages your clients will accept.
 
 The room ID is an unguessable routing identifier derived from the chat key, not the key itself. A server-password holder who learns a room ID can fetch its encrypted history and submit structurally valid packets without proving they hold that channel's key. Clients reject packets they cannot authenticate, but the relay cannot decrypt packets to check them. There is no public endpoint listing room IDs, and knowing a room ID alone does not bypass the server login.
+
+Specifically, authenticated `GET /v1/rooms/ROOM_ID/messages` returns encrypted envelopes and sequence numbers; authenticated `POST` to that same URL accepts an envelope with the expected format. A password holder could encrypt a packet with their own unrelated key and submit it to a known room ID. Your clients reject it, but the stored junk still consumes history capacity and can displace older packets. Downloading the ciphertext does not make it readable without the channel key. Those endpoints have no channel-deletion or password-reset capability.
 
 **Use HTTPS for remote connections.** The server password is sent during login, and session tokens authorize later requests; plain HTTP exposes both to network observers even though message bodies remain encrypted. HTTPS protects these credentials in transit. Upgrade the relay and clients to v0.4.0 together: older clients cannot log in to the protected relay.
 
@@ -157,6 +159,7 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 | `--auth-file FILE` | `run` | Server password hash file; defaults to `DATABASE.auth.json` beside the database. |
 | `--reset-password` | `run` | Set a new server password locally before starting; invalidates old sessions after restart. |
 | `--password-file FILE` | `run`, `chat`, `users`, `send`, `listen` | Read a server access password from a private UTF-8 file. For `run`, used only during first-run setup or password reset. |
+| `--cloudflare-tunnel` | `run` | Use Cloudflare's visitor-IP header for login/message limits. Requires a loopback listener and trusted local `cloudflared`; invalid or missing headers are rejected. |
 | `--export FILE` | `key create` | Also write a password-encrypted copy of the new key. |
 | `--no-store` | `key create` | Save only the encrypted export instead of using the keyring; requires `--export`. |
 | `--replace` | `key import` | Explicitly allow replacing a key already saved under the local chat name. |
@@ -324,15 +327,60 @@ If you save the relay command in a startup script or service, change `--urls` th
 
 Allow the chosen port through your host firewall if needed. For internet hosting, place the relay behind an HTTPS reverse proxy and connect with `https://...`. `/health` returns the release and protocol versions. SQLite retains ciphertext across restarts. Copy the database safely with SQLite's backup tools if needed; an active WAL database cannot be backed up reliably by copying just the main file.
 
-Requests and responses are size-limited. The server permits at most 64 request handlers and bounds its rate-limit cache. Online presence is limited to 100 sessions per channel and 1,000 total. POSTs, including presence refreshes and departures, use a per-source-IP token bucket (burst 30, refill one request/second). Behind a reverse proxy, clients may share the proxy's source-IP allowance; the relay doesn't trust arbitrary forwarding headers. Routine request logging is disabled so room URLs aren't written into its own access log. Your proxy may still log them.
+Requests and responses are size-limited. The server permits at most 64 request handlers and bounds its rate-limit cache. Online presence is limited to 100 sessions per channel and 1,000 total. POSTs, including presence refreshes and departures, use a per-source-IP token bucket (burst 30, refill one request/second). Direct mode uses the TCP peer's IP, so clients behind another reverse proxy can share its allowance. Cloudflare Tunnel mode uses the validated visitor IP instead. Routine request logging is disabled so room URLs aren't written into its own access log. Your proxy may still log them.
 
 ### Cloudflare Tunnel
 
-A Cloudflare Tunnel can forward a public HTTPS hostname to this relay. If `cloudflared` runs on the same machine, keep the relay bound to `http://127.0.0.1:8713` and point the tunnel's service URL there; clients use the public `https://...` hostname. This keeps the origin listener off the LAN and avoids opening an inbound router port, but the tunnel route still exposes the service through its public hostname.
+A Cloudflare Tunnel forwards a public HTTPS hostname to NoiseChat through `cloudflared`. The connector and relay must run on the same machine and share the same network namespace for NoiseChat's tunnel mode. The origin listens only on loopback; clients connect to the public HTTPS hostname. You do not need an inbound router port or a publicly exposed relay listener. Follow [Cloudflare's tunnel setup guide](https://developers.cloudflare.com/tunnel/get-started/) for connector installation and tunnel creation.
+
+#### What the mode does
+
+```text
+NoiseChat client → HTTPS → Cloudflare → encrypted tunnel → cloudflared → loopback HTTP → NoiseChat relay
+```
+
+Cloudflare adds the visitor's IP in [`CF-Connecting-IP`](https://developers.cloudflare.com/fundamentals/reference/http-headers/#cf-connecting-ip). Normally, the relay sees every tunnel request arriving from the local connector, so all visitors share the connector's cooldown. `--cloudflare-tunnel` uses that visitor header for **both** the five-login-attempts-per-minute limit and the separate POST/message rate limit. IPv6 spellings and IPv4-mapped IPv6 addresses are normalized so alternate spellings do not create extra allowances. Visitors with different public IPs get separate limits; people sharing a public IP still share a limit.
+
+The option is off by default. When enabled, it refuses wildcard/LAN listener addresses, accepts requests only from a loopback peer, and requires exactly one valid IP in `CF-Connecting-IP` for login and channel requests. Missing, malformed, duplicate, or comma-separated values receive HTTP 403 before consuming any visitor's allowance. It does not fall back to a shared connector-IP bucket. `/health` stays available without that header. Direct mode ignores `CF-Connecting-IP`, `X-Forwarded-For`, and other forwarded IP headers.
+
+Only enable this mode for a listener used by your trusted local connector. Loopback is a network restriction, not proof of which local process sent a request: other programs on that trusted machine can also supply headers. If using containers, the connector and relay must share a network namespace, such as supported host networking; separate bridge-network containers do not share `127.0.0.1`. Do not solve that by exposing this listener to the LAN. Remote connectors and arbitrary reverse proxies are not supported by this mode.
+
+#### Set it up
+
+1. Install/update NoiseChat from the checkout with `python -m pip install .`. The relay needs v0.4.1; clients need v0.4.0 or later for server-password login. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
+2. Start NoiseChat on the machine that will run `cloudflared`:
+
+   ```sh
+   noisechat run --urls "http://127.0.0.1:8713" --cloudflare-tunnel
+   ```
+
+   On first run, set and confirm the server access password. On later starts, keep the same database/authentication-file paths; the saved password hash is loaded. Keep `--cloudflare-tunnel` in your startup command or service. For another local port, change both `--urls` and the tunnel's service URL.
+3. In Cloudflare's dashboard, open **Networking → Tunnels**, create a tunnel, and follow the operating-system installation instructions to run `cloudflared` on this same machine. If you already have a connector/tunnel there, use it and add another route.
+4. Add a **Published application** route with your chosen hostname, for example `chat.example.com`, and service URL **`http://127.0.0.1:8713`**. The origin service is HTTP on loopback; the public client URL is HTTPS. If the form separates service type and address, select HTTP and enter `127.0.0.1:8713`.
+5. Keep Cloudflare's visitor-IP header enabled. Do not apply the **Remove visitor IP headers** transform to this hostname or remove/replace the header with another proxy or Worker. Tunnel mode rejects requests without a valid header.
+6. Give friends the public HTTPS URL, server access password, and their channel's encrypted key export/passphrase. Once the chat key is imported, connect:
+
+   ```sh
+   noisechat chat friends --server "https://chat.example.com" --name Alice
+   ```
+
+   Clients need neither `cloudflared` nor a tunnel-mode flag. They enter the server password when prompted. They should use the public hostname, including when testing on the relay machine; a direct local NoiseChat client cannot supply the connector header.
+
+#### Check and troubleshoot
+
+Check `https://chat.example.com/health` for health/version information, then connect with NoiseChat to test password login and messaging. Health alone does not verify visitor-header forwarding.
+
+| Symptom | Check |
+| --- | --- |
+| Startup says the mode requires loopback. | Use `http://127.0.0.1:8713`, `http://[::1]:8713`, or `http://localhost:8713`; `localhost` is bound explicitly to IPv4 loopback. |
+| Cloudflare returns HTTP 502. | Make sure the relay is running and the service URL matches its address/port. Verify that the connector shares its network namespace. |
+| NoiseChat returns HTTP 403. | Connect through the public hostname. Ensure the connector supplies exactly one valid `CF-Connecting-IP`, and no transform/proxy removes it. |
+| NoiseChat reports a login cooldown. | Wait for the reported time. Limits apply to your public IP; another person on the same public IP can share that allowance. |
+| Clients still share the connector's allowance. | Restart the relay with `--cloudflare-tunnel` and confirm its startup message reports Cloudflare Tunnel mode. |
 
 **A public tunnel alone does not add authentication.** NoiseChat now supplies its own server-password gate and login cooldown, so strangers cannot use channel endpoints without that password. Keep the origin bound to localhost, configure the server password locally first, and share only the public HTTPS URL with clients. The public hostname still receives unauthenticated traffic, and a shared-password holder can create channels or use relay capacity.
 
-Cloudflare Access can provide an additional gate; see its [Access setup guidance](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/). For a CLI, Access's [service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/) authenticate requests using `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers with a Service Auth policy. **NoiseChat does not currently supply those headers or perform Cloudflare's browser login**, so that additional Access-protected setup needs client integration first. Cloudflare terminates public HTTPS and can see the server login password, access tokens, and routing metadata; message contents remain encrypted, and clients never send the chat key. A private VPN/network is another way to restrict who reaches the relay. Tunnel clients may share one source IP for the relay's login cooldown and POST rate limits.
+Cloudflare Access can provide an additional gate; see its [Access setup guidance](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/). For a CLI, Access's [service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/) authenticate requests using `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers with a Service Auth policy. **NoiseChat does not currently supply those headers or perform Cloudflare's browser login**, so that additional Access-protected setup needs client integration first. Tunnel mode only changes trusted visitor-IP handling; it does not enable Cloudflare Access. Cloudflare terminates public HTTPS and can see the server login password, access tokens, and routing metadata; message contents remain encrypted, and clients never send the chat key. A private VPN/network is another way to restrict who reaches the relay.
 
 ## Message storage and retention
 
@@ -399,9 +447,16 @@ python -m unittest discover -s tests -v
 python -m compileall -q noisechat tests
 ```
 
-Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
+Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, and terminal escapes. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.1
+
+- Add an explicit Cloudflare Tunnel mode with loopback-only origin binding.
+- Use validated, normalized `CF-Connecting-IP` addresses for login cooldowns and POST rate limits.
+- Reject missing, malformed, duplicate, and nonlocal forwarding requests; preserve direct-mode IP handling.
+- Document tunnel behavior, setup, password protection, and troubleshooting.
 
 ## v0.4.0
 

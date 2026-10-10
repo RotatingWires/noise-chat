@@ -1,6 +1,7 @@
 """A bounded HTTP relay. It never imports client keys or decrypts messages."""
 
 import hashlib
+import ipaddress
 import json
 import re
 import socket
@@ -24,6 +25,32 @@ ROOM_PATH = re.compile(r"/v1/rooms/([0-9a-f]{64})/(messages|presence)")
 
 class RequestTooLargeError(NoiseChatError):
     pass
+
+
+class TunnelRequestError(NoiseChatError):
+    pass
+
+
+def canonical_ip(value: str):
+    if not value or len(value) > 45 or "%" in value:
+        raise ValueError("Invalid IP address.")
+    address = ipaddress.ip_address(value)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        return address.ipv4_mapped
+    return address
+
+
+def tunnel_listen_host(host: str) -> str:
+    if host.lower() == "localhost":
+        return "127.0.0.1"
+    try:
+        address = canonical_ip(host)
+        if address.is_loopback:
+            return str(address)
+    except ValueError:
+        pass
+    raise NoiseChatError("--cloudflare-tunnel requires a loopback listen address, such as http://127.0.0.1:8713. "
+                         "Run cloudflared on the same machine and network namespace.")
 
 
 class RelayStore:
@@ -166,11 +193,14 @@ class RelayServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, store: RelayStore, verifier: PasswordVerifier):
+    def __init__(self, address, store: RelayStore, verifier: PasswordVerifier, cloudflare_tunnel: bool = False):
+        if cloudflare_tunnel:
+            address = (tunnel_listen_host(address[0]), address[1])
         if ":" in address[0]:
             self.address_family = socket.AF_INET6
         self.store = store
         self.access = RelayAccess(verifier)
+        self.cloudflare_tunnel = cloudflare_tunnel
         self.workers = threading.BoundedSemaphore(64)
         self.rate_lock = threading.Lock()
         self.rates = OrderedDict()
@@ -239,6 +269,20 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.respond(401, {"error": "Server login required."}, {"WWW-Authenticate": 'Bearer realm="NoiseChat"'})
         return False
 
+    def visitor_ip(self) -> str:
+        peer = self.client_address[0]
+        if not self.server.cloudflare_tunnel:
+            # Direct mode never trusts IPs supplied in HTTP headers.
+            return peer
+        values = self.headers.get_all("CF-Connecting-IP", [])
+        try:
+            if not canonical_ip(peer).is_loopback or len(values) != 1:
+                raise ValueError()
+            return str(canonical_ip(values[0].strip()))
+        except ValueError:
+            # Fail closed rather than charging unrelated users to the connector's IP.
+            raise TunnelRequestError() from None
+
     def read_json(self):
         lengths = self.headers.get_all("Content-Length", [])
         if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,6}", lengths[0]):
@@ -253,8 +297,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             raise NoiseChatError("Incomplete request.")
         return json.loads(raw)
 
-    def login(self) -> None:
-        retry = self.server.access.login_attempt(self.client_address[0])
+    def login(self, address: str) -> None:
+        retry = self.server.access.login_attempt(address)
         if retry:
             self.respond(429, {"error": "Too many login attempts.", "retry_after": retry}, {"Retry-After": retry})
             return
@@ -280,6 +324,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             if parsed.path == "/health" and not parsed.query:
                 self.respond(200, {"ok": True, "version": __version__, "protocol": 1})
                 return
+            self.visitor_ip()
             if not self.require_access():
                 return
             if room is None:
@@ -303,6 +348,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.respond(200, {"messages": messages})
         except ChannelDeletedError:
             self.respond(410, {"error": "Channel deleted."})
+        except TunnelRequestError:
+            self.respond(403, {"error": "Cloudflare Tunnel requires a local connector and one valid CF-Connecting-IP header."})
         except (NoiseChatError, ValueError):
             self.respond(400, {"error": "Invalid request or unavailable relay."})
         except sqlite3.Error:
@@ -311,15 +358,16 @@ class RelayHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             parsed, room, resource = self.route()
+            address = self.visitor_ip()
             if parsed.path == "/v1/auth/login" and not parsed.query:
-                self.login()
+                self.login(address)
                 return
             if not self.require_access():
                 return
             if room is None or parsed.query:
                 self.respond(404, {"error": "Not found."})
                 return
-            if not self.server.allow_post(self.client_address[0]):
+            if not self.server.allow_post(address):
                 self.respond(429, {"error": "Too many messages. Try again shortly."})
                 return
             body = self.read_json()
@@ -340,6 +388,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.respond(201, {"sequence": sequence})
         except ChannelDeletedError:
             self.respond(410, {"error": "Channel deleted."})
+        except TunnelRequestError:
+            self.respond(403, {"error": "Cloudflare Tunnel requires a local connector and one valid CF-Connecting-IP header."})
         except RequestTooLargeError:
             self.respond(413, {"error": "Request is too large."})
         except (NoiseChatError, UnicodeError, ValueError, RecursionError):
@@ -383,13 +433,17 @@ def console(store: RelayStore, server: RelayServer) -> None:
             print("Error: Relay database could not be updated.")
 
 
-def serve(host: str, port: int, database: Path, verifier: PasswordVerifier) -> None:
+def serve(host: str, port: int, database: Path, verifier: PasswordVerifier, cloudflare_tunnel: bool = False) -> None:
+    if cloudflare_tunnel:
+        host = tunnel_listen_host(host)
     store = RelayStore(database)
     try:
-        server = RelayServer((host, port), store, verifier)
+        server = RelayServer((host, port), store, verifier, cloudflare_tunnel=cloudflare_tunnel)
         address = f"[{host}]" if ":" in host else host
         print(f"NoiseChat v{__version__} relay on http://{address}:{server.server_port}", flush=True)
         print("Server password required. Stores ciphertext only. Press Ctrl+C to stop.", flush=True)
+        if cloudflare_tunnel:
+            print("Cloudflare Tunnel mode: limits use CF-Connecting-IP from the local connector.", flush=True)
         if sys.stdin.isatty():
             threading.Thread(target=console, args=(store, server), daemon=True).start()
         try:
