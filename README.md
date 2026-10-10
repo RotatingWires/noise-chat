@@ -26,6 +26,14 @@ SQLite stores encrypted messages and join announcements across restarts. Online 
 
 `noisechat run` starts this backend as a foreground process. Its HTTP listener defaults to `http://127.0.0.1:8713`; `--urls` sets the listen IP/host and port. For public HTTPS access, run the HTTP backend behind an HTTPS reverse proxy. Python describes `http.server` as a basic server with limited security checks; NoiseChat adds the bounds described below.
 
+## Access and authentication
+
+NoiseChat currently has **no server login, authentication cookie, or API-key requirement**. The shared chat key protects message contents and lets clients authenticate encrypted packets; it does not authorize access to the relay's HTTP API. Rate limits and capacity limits are not a login system.
+
+With the default `http://127.0.0.1:8713` listener, only programs on the server machine can reach the relay directly. With `--urls "http://0.0.0.0:8713"`, anyone on the LAN who can reach that port through the firewall can contact the relay and use their own shared key to start their own channel. Your friends need your channel's key to read its messages or produce messages your clients will accept.
+
+The room ID is an unguessable routing identifier derived from the key, not the key itself. Anyone who learns a room ID can fetch its encrypted history and submit structurally valid encrypted packets without proving they hold the key. Clients reject packets they cannot authenticate, but the server cannot distinguish a genuine message from junk encrypted with the wrong key. There is no public endpoint listing all room IDs. Plain HTTP exposes room IDs and session tokens to network observers; HTTPS protects the transport but does not add a NoiseChat login. Restrict network access to the people/devices you intend to let use the relay.
+
 ## Install
 
 Requires Python 3.11 or newer. From this project folder:
@@ -45,6 +53,20 @@ python -m pip install .
 ```
 
 On Windows PowerShell, create one with `py -m venv .venv`, then activate it with `.\.venv\Scripts\Activate.ps1`. Alternatively, run `.\.venv\Scripts\python.exe -m pip install .` and `.\.venv\Scripts\noisechat.exe` directly.
+
+## Channels, keys, and local chat names
+
+**On a given relay, each distinct shared chat key identifies its own channel (room).** The key determines the room ID; the name you type as `CHAT` does not. Different relays keep separate histories and online rosters even when you use the same key on both.
+
+The chat name is **only a local alias** for a key in your device's OS keyring. It is not registered with the server or sent in requests, and it does not have to match anyone else's alias. With `--key-file`, `CHAT` is just your local label and the key inside the selected file determines the channel. `--name` is separate: it is your display name, encrypted inside messages and presence records.
+
+| Keys and local aliases | Channel on the same relay |
+| --- | --- |
+| You use `friends`; Bob uses `gaming`; both imported the same shared key. | Same channel. |
+| You and Bob both use `friends`, but each ran `key create` separately. | Different channels, because the generated keys differ. |
+| You save the same key under two aliases on your device. | Both aliases address the same channel. |
+
+Creating or importing a key is a local operation. A channel's retained history begins when a client first submits a message or join announcement; there is no separate server-side room registration or room-name record. Use `noisechat key info CHAT` to compare room IDs with a friend without revealing the key.
 
 ## Try it locally
 
@@ -170,14 +192,42 @@ noisechat chat friends --key-file friends.noise-key --server "http://127.0.0.1:8
 
 The passphrase is prompted with input hidden; it is never a command-line argument or environment variable. With `--key-file`, the chat key is kept in process memory and isn't saved in a credential store. Exports are created with mode 0600 on Unix and remain password-encrypted on every OS.
 
-Other key operations:
+Export another password-encrypted copy:
 
 ```sh
 noisechat key export friends another-copy.noise-key
+```
+
+## Remove a key or room
+
+To remove a saved key from **your device's keyring**:
+
+```sh
 noisechat key remove friends
 ```
 
-Removing a local key doesn't revoke anyone else's copy. To remove a person from a chat, create a new shared key, distribute it to the remaining participants, and start using its new room. Losing every copy of a key makes its messages unrecoverable.
+This removes only the keyring entry under your local alias `friends`. It does not delete the relay's messages, any other alias holding the same key, exported `.noise-key` files, or your friends' copies. If you use `--key-file`, delete that encrypted file separately using your file manager. The `key remove` command does not delete files.
+
+There is no server-side key to delete. To revoke a person's future access, generate a **new** shared key and give it only to the remaining participants; they move to its new channel. Anyone keeping the old key can still decrypt captured or retained old messages. Losing every copy of a key makes that key's ciphertext unrecoverable.
+
+There is currently **no room-deletion CLI command or remote deletion API**. To erase one room's retained history, the relay operator can delete its rows locally:
+
+1. Before removing your local key, run `noisechat key info friends` and copy the room ID. Use `--key-file FILE` if that is how you keep the key.
+2. Stop the relay so its online roster is cleared and clients cannot write during deletion.
+3. On the server, run `python` to open Python's interactive prompt. Run the following statements, changing the database path if you started the relay with `--database`:
+
+```python
+import sqlite3
+db = sqlite3.connect("relay.sqlite3")
+room = input("Room ID from key info: ").strip()
+deleted = db.execute("DELETE FROM messages WHERE room = ?", (room,)).rowcount
+db.commit()
+print(f"Deleted {deleted} stored packets.")
+db.close()
+exit()
+```
+
+Paste the room ID at the prompt, not the local name `friends`. Other rooms' rows are left intact. This removes retained rows, not copies in backups or friends' terminals, and is not guaranteed secure disk erasure. It does not ban the old key: after restarting the relay, a client with that key can recreate the room by sending another message or joining again.
 
 ## One-shot and offline commands
 
@@ -233,9 +283,32 @@ If you save the relay command in a startup script or service, change `--urls` th
 
 Allow the chosen port through your host firewall if needed. For internet hosting, place the relay behind an HTTPS reverse proxy and connect with `https://...`. `/health` returns the release and protocol versions. SQLite retains ciphertext across restarts. Copy the database safely with SQLite's backup tools if needed; an active WAL database cannot be backed up reliably by copying just the main file.
 
-The defaults retain at most 500 messages per room and 10,000 messages total across at most 100 active rooms. The oldest retained messages are removed as limits are reached; this is a chat relay, not a permanent archive. SQLite may retain previously allocated disk pages after deletion. No plaintext transcript is written on clients.
-
 Requests and responses are size-limited. The server permits at most 64 request handlers and bounds its rate-limit cache. Online presence is limited to 100 sessions per channel and 1,000 total. POSTs, including presence refreshes and departures, use a per-source-IP token bucket (burst 30, refill one request/second). Behind a reverse proxy, clients may share the proxy's source-IP allowance; the relay doesn't trust arbitrary forwarding headers. Routine request logging is disabled so room URLs aren't written into its own access log. Your proxy may still log them.
+
+## Message storage and retention
+
+**Yes, messages are stored.** The default `relay.sqlite3` database is created in the relay's working directory; `noisechat run --database FILE` selects a different path. It keeps encrypted history across server restarts so clients can retrieve messages they missed while offline. There is one database for all channels, not one file per key.
+
+Each row in the `messages` table contains:
+
+| Field | Stored value |
+| --- | --- |
+| `sequence` | A server-assigned integer cursor used to retrieve packets in order. |
+| `room` | The derived room ID used to route packets. This is neither the secret key nor your local chat alias. |
+| `digest` | A SHA-256 hash of the encrypted envelope, used to suppress duplicate submissions while retained. |
+| `envelope` | The encrypted packet, including its encrypted message/event type, sender, text, message ID, and timestamp. Join announcements are stored here too. |
+
+The database contains no raw chat keys, key-file passphrases, plaintext message bodies, plaintext display names, or local chat aliases. SQLite also keeps its indexes and sequence metadata. Online presence, departure tokens, and the source-IP rate-limit cache are held only in memory; presence expires within 60 seconds of its last accepted refresh, and all presence is cleared on restart. The client does not write a plaintext transcript, although your terminal's scrollback or logging may retain displayed text.
+
+History retention is **based on packet counts, not time**:
+
+- At most **500 retained packets per room**, counting messages and join announcements.
+- At most **10,000 retained packets across the relay**. This global limit can trim a room below 500 packets.
+- At most **100 rooms** with retained history or active presence.
+- New packets cause the oldest retained packets to be removed when a limit is exceeded. Reading a message does not delete it.
+- There is **no age-based expiration**. If a room is quiet and the global limit is not reached, its encrypted history can remain indefinitely, including across restarts.
+
+The history limits are defined by `RelayStore` defaults in `noisechat/relay.py`; there are currently no CLI flags to change them. SQLite can retain previously allocated disk pages after row deletion, so retention is not a promise of secure erasure. The room-history deletion procedure above is separate from removing a local key.
 
 ## What the encryption does
 
@@ -257,8 +330,6 @@ Sending the same plaintext twice produces different ciphertext. Base64 merely ma
 HTTP still hides message contents from someone who lacks the key, but exposes room IDs, IP addresses, approximate sizes, timing, and traffic patterns. HTTP observers can also disrupt traffic or submit junk/replay packets. HTTPS protects the transport and authenticates the server, so use it when hosting publicly.
 
 Online status exposes connection counts and presence timing to the relay. Each chat session uses a random private token to refresh or remove its presence; that token is sent over the transport but is never in the public roster or SQLite database. HTTP observers can capture it, so use HTTPS to protect presence updates too. The roster is a relay-reported view, not proof of a person's identity or guaranteed connectivity; a relay or key holder can replay or fabricate presence.
-
-Room IDs are unguessable routing capabilities derived from the random key, but the relay has no separate accounts or access-control system. Anyone who learns a room ID can retrieve its ciphertext or submit packets. Clients reject forged contents without the key; that doesn't prevent bandwidth/storage abuse or denial of service.
 
 All shared-key holders can read all messages and use any display name. Names are not cryptographic identities. A relay can delay, reorder, omit, or replay messages; client replay suppression is session-local and bounded. This version has no forward secrecy: if the shared key is later compromised, captured old ciphertext can be decrypted. Rotate by creating a new key and distributing it again.
 
