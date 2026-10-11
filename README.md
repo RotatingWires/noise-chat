@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.3
+# NoiseChat v0.4.4
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -36,6 +36,8 @@ On first run, the relay prompts for a server password of at least 12 characters 
 
 Clients prompt for the server password once per command, also with input hidden. Login uses `POST /v1/auth/login`; a successful login returns a random token sent in the `Authorization: Bearer` header on channel requests. Tokens are held in client memory and stored only as hashes in server memory. They expire after 12 hours, and a relay restart invalidates them. Clients log in again automatically after expiry or a restart while keeping their in-memory message cursor. An incorrect password or login cooldown stops background retries. `/health` remains public and exposes only basic health and version information.
 
+The 12-hour lifetime applies to a token held by a running client. `/quit`, Ctrl+C, or closing the terminal ends that client process and discards its token. Starting `noisechat join`, `send`, `listen`, or `users` again asks for the server password and gets a new token. Tokens are not saved between commands, and the prompted server password is not saved in the OS keyring. A temporary network disconnection while the client keeps running preserves its token; it reconnects without prompting while that token remains valid.
+
 Like TL and TLS, login permits **five attempts per source IP in a one-minute window**, including successful and malformed attempts. Further attempts receive HTTP 429 with `Retry-After` and the CLI reports how many seconds to wait. Retrying during the cooldown does not extend it. Normal authenticated polling and messages do not count as logins. Attempts and sessions are bounded and kept only in memory, so restarting the relay clears the cooldown. Direct mode uses the TCP peer's IP and ignores forwarded IP headers. With `run --cloudflare-tunnel`, a trusted local connector's `CF-Connecting-IP` identifies each visitor for both login and message limits; see the setup below. Existing message rate limits apply separately.
 
 With the default `http://127.0.0.1:8713` listener, only programs on the server machine can reach the relay directly. With `--urls "http://0.0.0.0:8713"`, people on the LAN can contact its listener if the firewall allows it, but need the server password to use channel endpoints. Anyone you give that password can start their own channels with their own chat keys. Your friends still need your channel's key to read its messages or produce messages your clients will accept.
@@ -58,7 +60,7 @@ Enter and confirm the new password. This local startup option also resets a forg
 
 ### Background commands and services
 
-`--password-file FILE` reads a UTF-8 server password from a file instead of prompting. Use it on `chat`, `send`, `listen`, or `users`; on `run`, it sets the password during first-run setup or `--reset-password`. An existing verifier is loaded on ordinary server restarts, so a configured service needs only the hash file and database. Changing a password file does not automatically reset an existing server password.
+`--password-file FILE` reads a UTF-8 server password from a file instead of prompting. Use it on `join`, `send`, `listen`, or `users`; on `run`, it sets the password during first-run setup or `--reset-password`. An existing verifier is loaded on ordinary server restarts, so a configured service needs only the hash file and database. Changing a password file does not automatically reset an existing server password.
 
 ```sh
 noisechat run --urls "http://127.0.0.1:8713" --password-file server.noise-password
@@ -122,11 +124,11 @@ Choose a strong export passphrase when prompted. The raw key goes into your OS k
 Open two more terminals:
 
 ```sh
-noisechat chat friends --server "http://127.0.0.1:8713" --name Alice
+noisechat join friends --server "http://127.0.0.1:8713" --name Alice
 ```
 
 ```sh
-noisechat chat friends --server "http://127.0.0.1:8713" --name Bob
+noisechat join friends --server "http://127.0.0.1:8713" --name Bob
 ```
 
 Type a message and press Enter. Everyone in the channel receives an encrypted `[Wall] Alice joined the chat.` announcement when Alice connects. `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and join announcements appear when you connect. Incoming messages appear above your current draft while you type. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
@@ -146,7 +148,7 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 | `noisechat key export CHAT FILE` | Write a password-encrypted copy of an existing key for USB distribution or backup. |
 | `noisechat key info CHAT` | Show the derived room ID so friends can compare keys, without printing the secret key. |
 | `noisechat key remove CHAT` | Delete your local keyring entry; other people's copies and exported files still work. |
-| `noisechat chat CHAT --server "SERVER" --name NAME` | Join a channel, announce your arrival, and send and receive interactively. Keeps your online status refreshed while running. |
+| `noisechat join CHAT --server "SERVER" --name NAME` | Join a channel, announce your arrival, and send and receive interactively. Keeps your online status refreshed while running. |
 | `noisechat users CHAT [CHAT ...] --server "SERVER"` | List all connected chat sessions and their channels for one or more shared keys you hold. |
 | `noisechat send CHAT --server "SERVER" --name NAME` | Prompt for one message, encrypt and send it, then exit. Does not join the online roster. |
 | `noisechat listen CHAT --server "SERVER"` | Read retained messages and keep listening. This is an unnamed, receive-only command; it does not join the online roster. |
@@ -159,19 +161,19 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 | `--database FILE` | `run` | SQLite ciphertext database; defaults to `relay.sqlite3` in the current directory. |
 | `--auth-file FILE` | `run` | Server password hash file; defaults to `DATABASE.auth.json` beside the database. |
 | `--reset-password` | `run` | Set a new server password locally before starting; invalidates old sessions after restart. |
-| `--password-file FILE` | `run`, `chat`, `users`, `send`, `listen` | Read a server access password from a private UTF-8 file. For `run`, used only during first-run setup or password reset. |
+| `--password-file FILE` | `run`, `join`, `users`, `send`, `listen` | Read a server access password from a private UTF-8 file. For `run`, used only during first-run setup or password reset. |
 | `--cloudflare-tunnel` | `run` | Use Cloudflare's visitor-IP header for login/message limits. Requires a loopback listener and trusted local `cloudflared`; invalid or missing headers are rejected. |
 | `--export FILE` | `key create` | Also write a password-encrypted copy of the new key. |
 | `--no-store` | `key create` | Save only the encrypted export instead of using the keyring; requires `--export`. |
 | `--replace` | `key import` | Explicitly allow replacing a key already saved under the local chat name. |
-| `--key-file FILE` | `key info`, `chat`, `users`, `send`, `listen`, `encrypt`, `decrypt` | Unlock an encrypted file instead of reading the keyring. For `users`, this supports one channel per invocation. |
-| `--server "URL"` | `chat`, `users`, `send`, `listen` | Required relay URL. |
-| `--name NAME` | `chat`, `send`, `encrypt` | Required display name, encrypted before transmission. |
+| `--key-file FILE` | `key info`, `join`, `users`, `send`, `listen`, `encrypt`, `decrypt` | Unlock an encrypted file instead of reading the keyring. For `users`, this supports one channel per invocation. |
+| `--server "URL"` | `join`, `users`, `send`, `listen` | Required relay URL. |
+| `--name NAME` | `join`, `send`, `encrypt` | Required display name, encrypted before transmission. |
 | `--stdin` | `send`, `encrypt` | Read UTF-8 message text from standard input instead of prompting. |
 | `--once` | `listen` | Read one batch immediately, print its cursor, and exit. |
 | `--after NUMBER` | `listen` | Start after a previous relay cursor; defaults to `0` for retained history. |
 
-Inside interactive `chat`:
+Inside interactive `join`:
 
 | Input | What it does |
 | --- | --- |
@@ -214,7 +216,7 @@ Copy `friends.noise-key` onto the USB drive. Give your friend its export passphr
 ```sh
 noisechat key import friends /path/to/usb/friends.noise-key
 noisechat key info friends
-noisechat chat friends --server "https://your-relay.example.com" --name Bob
+noisechat join friends --server "https://your-relay.example.com" --name Bob
 ```
 
 Windows paths work too, for example `E:\friends.noise-key`. Import asks for the export passphrase; connecting asks for the server access password. Compare the room ID printed by `key info` with yours to confirm that you imported the same key. Their local chat name can differ; the key determines the room.
@@ -237,7 +239,7 @@ If a Linux machine has no desktop keyring, keep only an encrypted key file and u
 
 ```sh
 noisechat key create friends --export friends.noise-key --no-store
-noisechat chat friends --key-file friends.noise-key --server "http://127.0.0.1:8713" --name Alice
+noisechat join friends --key-file friends.noise-key --server "http://127.0.0.1:8713" --name Alice
 ```
 
 The key-file passphrase is prompted with input hidden; it is never a command-line argument or environment variable. Connecting also prompts for the separate server access password. With `--key-file`, the chat key is kept in process memory and isn't saved in a credential store. Exports are created with mode 0600 on Unix and remain password-encrypted on every OS.
@@ -321,7 +323,7 @@ noisechat run --urls "http://0.0.0.0:9000"
 Clients must use the same port in `--server`:
 
 ```sh
-noisechat chat friends --server "http://192.168.1.50:9000" --name Alice
+noisechat join friends --server "http://192.168.1.50:9000" --name Alice
 ```
 
 If you save the relay command in a startup script or service, change `--urls` there to keep your chosen port across restarts. To change the program's built-in default instead, edit `DEFAULT_RELAY_URL` near the top of `noisechat/cli.py`, then reinstall with `python -m pip install .`. There is no separate port configuration file. Running `noisechat run` without `--urls` uses that default.
@@ -362,7 +364,7 @@ Only enable this mode for a listener used by your trusted local connector. Loopb
 6. Give friends the public HTTPS URL, server access password, and their channel's encrypted key export/passphrase. Once the chat key is imported, connect:
 
    ```sh
-   noisechat chat friends --server "https://chat.example.com" --name Alice
+   noisechat join friends --server "https://chat.example.com" --name Alice
    ```
 
    Clients need neither `cloudflared` nor a tunnel-mode flag. They enter the server password when prompted. They should use the public hostname, including when testing on the relay machine; a direct local NoiseChat client cannot supply the connector header.
@@ -410,7 +412,7 @@ The history limits are defined by `RelayStore` defaults in `noisechat/relay.py`;
 
 ### How history appears when you connect
 
-`noisechat chat` automatically displays retained history when you connect. A new client session starts its in-memory cursor at `0`, requests the room's retained packets from the relay, decrypts them locally, and prints them in relay sequence order, oldest first. History includes retained join announcements and your own earlier messages. Responses contain at most 100 packets, and chat keeps reading further batches before long-polling for new messages. There is no separate restore command.
+`noisechat join` automatically displays retained history when you connect. A new client session starts its in-memory cursor at `0`, requests the room's retained packets from the relay, decrypts them locally, and prints them in relay sequence order, oldest first. History includes retained join announcements and your own earlier messages. Responses contain at most 100 packets, and `join` keeps reading further batches before long-polling for new messages. There is no separate restore command.
 
 During a temporary connection loss, a still-running client keeps its cursor and resumes after the last packet it received. Closing and reopening the client starts a new session and displays all still-retained history again; no cursor is persisted to disk. Packets already evicted by retention or removed by channel deletion cannot be restored from the relay.
 
@@ -451,6 +453,11 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.4
+
+- Rename the interactive channel command to `join` and update the command reference, examples, and transport tests.
+- Clarify the 12-hour token lifetime and why starting a new client prompts for the server password again.
 
 ## v0.4.3
 

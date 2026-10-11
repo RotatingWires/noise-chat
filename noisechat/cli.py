@@ -143,7 +143,7 @@ def key_command(args) -> None:
         print("Compare this room ID with a friend's to confirm that you imported the same key.")
 
 
-def chat_command(args) -> None:
+def join_command(args) -> None:
     key = load_key(args)
     client = Client(args.server, key, read_server_password(args))
     # Reject a bad name before starting the receiver, without transmitting anything.
@@ -260,16 +260,16 @@ def parser() -> argparse.ArgumentParser:
     users.add_argument("--key-file", type=Path, help="unlock an encrypted key file for a single channel")
     users.add_argument("--password-file", type=Path, metavar="FILE", help="read the server access password from a private file")
 
-    for name, help_text in [("chat", "send and receive interactively"), ("send", "send one message"),
+    for name, help_text in [("join", "join a channel and send and receive interactively"), ("send", "send one message"),
                             ("listen", "receive messages"), ("encrypt", "turn text into ciphertext offline"),
                             ("decrypt", "read pasted ciphertext offline")]:
         command = commands.add_parser(name, help=help_text)
         command.add_argument("chat", help="local name of the shared key")
         command.add_argument("--key-file", type=Path, help="unlock an encrypted key file instead of using the OS keyring")
-        if name in {"chat", "send", "listen"}:
+        if name in {"join", "send", "listen"}:
             command.add_argument("--server", required=True, help="relay URL, including http:// or https://")
             command.add_argument("--password-file", type=Path, metavar="FILE", help="read the server access password from a private file")
-        if name in {"chat", "send", "encrypt"}:
+        if name in {"join", "send", "encrypt"}:
             command.add_argument("--name", required=True, help="display name (encrypted along with your message)")
         if name in {"send", "encrypt"}:
             command.add_argument("--stdin", action="store_true", help="read message text from standard input instead of prompting")
@@ -291,8 +291,8 @@ def main(argv=None) -> int:
             serve(host, port, args.database, server_verifier(args), cloudflare_tunnel=args.cloudflare_tunnel)
         elif args.command == "key":
             key_command(args)
-        elif args.command == "chat":
-            chat_command(args)
+        elif args.command == "join":
+            join_command(args)
         elif args.command == "users":
             users_command(args)
         else:
