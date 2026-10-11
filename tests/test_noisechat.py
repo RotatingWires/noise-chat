@@ -334,7 +334,7 @@ class RelayTests(unittest.TestCase):
                            encrypt_event(self.key, "Fake", "join"))
         self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
 
-    def test_users_cli_multiple_channels_and_chat_users_leave(self):
+    def test_users_cli_multiple_channels_and_join_users_leave(self):
         second_key = generate_key()
         other = self.client(second_key)
         self.alice.connect("a" * 64, "Alice")
@@ -363,7 +363,7 @@ class RelayTests(unittest.TestCase):
                 return next(chat_input.commands)
             chat_input.commands = iter(["/users", "/quit"])
             with patch("noisechat.cli.Client", return_value=self.bob), contextlib.redirect_stdout(output), patch("builtins.input", side_effect=chat_input):
-                self.assertEqual(cli.main(["chat", "friends", "--server", "http://relay.test", "--name", "Bob"]), 0)
+                self.assertEqual(cli.main(["join", "friends", "--server", "http://relay.test", "--name", "Bob"]), 0)
             self.assertRegex(output.getvalue(), r"Bob\s+friends")
             self.assertEqual([user["sender"] for user in self.alice.users()], ["Alice"])
             messages = [decrypt_message(self.key, record["envelope"]) for record in self.alice.poll(0, 0)]
@@ -406,7 +406,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.bob.users(), [])
         self.assertEqual(len(self.bob.poll(0, 0)), 1, "Heartbeats must not fill message history.")
         with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", return_value=self.bob), patch("builtins.input", side_effect=OSError("input failed")), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(["chat", "friends", "--server", "http://relay.test", "--name", "Bob"]), 1)
+            self.assertEqual(cli.main(["join", "friends", "--server", "http://relay.test", "--name", "Bob"]), 1)
         self.assertEqual(self.alice.users(), [])
 
     def test_console_deletion_erases_one_channel_and_blocks_it_across_restarts(self):
@@ -500,7 +500,7 @@ class RelayTests(unittest.TestCase):
         self.assertFalse(presence.thread.is_alive())
         self.assertEqual(self.store.presence, {})
 
-    def test_chat_automatically_displays_retained_history_across_batches(self):
+    def test_join_automatically_displays_retained_history_across_batches(self):
         self.store.history_per_room = 500
         self.store.max_messages = 1000
         for number in range(125):
@@ -512,11 +512,11 @@ class RelayTests(unittest.TestCase):
                 time.sleep(.005)
             return "/quit"
         with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", return_value=self.bob), patch("builtins.input", side_effect=wait_for_history), contextlib.redirect_stdout(output):
-            self.assertEqual(cli.main(["chat", "friends", "--server", "http://relay.test", "--name", "Bob"]), 0)
+            self.assertEqual(cli.main(["join", "friends", "--server", "http://relay.test", "--name", "Bob"]), 0)
         history = [line.split("Alice: ", 1)[1] for line in output.getvalue().splitlines() if "Alice: history" in line]
         self.assertEqual(history, [f"history{number:03}" for number in range(125)])
 
-    def test_cli_send_listen_and_live_chat_use_the_same_encrypted_transport(self):
+    def test_cli_send_listen_and_live_join_use_the_same_encrypted_transport(self):
         output=io.StringIO()
         with patch("noisechat.keys.native_backend",return_value=MemoryKeyring()):
             KeyStore().put("friends",self.key)
@@ -536,7 +536,7 @@ class RelayTests(unittest.TestCase):
                 return "/quit"
             chat_input.sent=False
             with patch("noisechat.cli.Client",return_value=self.bob),contextlib.redirect_stdout(output),patch("builtins.input",side_effect=chat_input):
-                self.assertEqual(cli.main(["chat","friends","--server","http://relay.test","--name","Bob"]),0)
+                self.assertEqual(cli.main(["join","friends","--server","http://relay.test","--name","Bob"]),0)
             self.assertIn("Bob: live chat works",output.getvalue())
         self.assertNotIn(b"live chat works",b"".join(self.wire.requests))
 
@@ -781,7 +781,7 @@ class AccessTests(unittest.TestCase):
         with patch("noisechat.cli.getpass.getpass", side_effect=AssertionError("No hidden prompt needed")), contextlib.redirect_stdout(io.StringIO()):
             self.assertTrue(cli.server_verifier(args).verify(SERVER_PASSWORD))
             self.assertEqual(cli.read_server_password(args), SERVER_PASSWORD)
-        for command in (["chat", "friends", "--name", "Alice"], ["send", "friends", "--name", "Alice"], ["listen", "friends"], ["users", "friends"]):
+        for command in (["join", "friends", "--name", "Alice"], ["send", "friends", "--name", "Alice"], ["listen", "friends"], ["users", "friends"]):
             parsed = cli.parser().parse_args(command + ["--server", "http://relay.test", "--password-file", str(password_file)])
             self.assertEqual(cli.read_server_password(parsed), SERVER_PASSWORD)
         if os.name != "nt":
@@ -794,7 +794,7 @@ class AccessTests(unittest.TestCase):
             with self.assertRaises(NoiseChatError):
                 cli.read_server_password(args)
 
-    def test_cli_password_file_send_listen_chat_and_users_use_real_authentication(self):
+    def test_cli_password_file_send_listen_join_and_users_use_real_authentication(self):
         password_file = self.path / "server.noise-password"
         password_file.write_text(SERVER_PASSWORD)
         password_file.chmod(0o600)
@@ -810,7 +810,7 @@ class AccessTests(unittest.TestCase):
             self.assertEqual(cli.main(["listen", "friends", "--once"] + common), 0)
             self.assertIn("Alice: piped message", output.getvalue())
             with patch("builtins.input", return_value="/quit"):
-                self.assertEqual(cli.main(["chat", "friends", "--name", "Alice"] + common), 0)
+                self.assertEqual(cli.main(["join", "friends", "--name", "Alice"] + common), 0)
             self.assertEqual(cli.main(["users", "friends"] + common), 0)
         self.assertEqual(self.store.presence, {})
 
