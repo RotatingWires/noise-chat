@@ -143,6 +143,25 @@ class KeyTests(unittest.TestCase):
         self.assertIn(room_id(key), output.getvalue())
         self.assertNotIn(key.hex(), output.getvalue())
 
+    def test_key_list_prunes_invalid_index_entries_and_unreadable_keys(self):
+        from keyring.errors import KeyringError
+        from noisechat.keys import INDEX_ALIAS, SERVICE
+        class LockedKeyring(MemoryKeyring):
+            def get_password(self, service, name):
+                if name == "locked":
+                    raise KeyringError("locked")
+                return super().get_password(service, name)
+        backend, key = LockedKeyring(), generate_key()
+        backend.set_password(SERVICE, "friends", b64encode(key))
+        backend.set_password(SERVICE, "damaged", b64encode(b"short"))
+        backend.set_password(SERVICE, INDEX_ALIAS, json.dumps([
+            "friends", "missing", "damaged", "locked", INDEX_ALIAS, "_invalid", 12]))
+        with patch("noisechat.keys.native_backend", return_value=backend) as select:
+            self.assertEqual(KeyStore().list(), [("friends", room_id(key))])
+        select.assert_called_once_with()
+        self.assertEqual(json.loads(backend.get_password(SERVICE, INDEX_ALIAS)), ["friends"])
+        self.assertEqual(backend.get_password(SERVICE, "friends"), b64encode(key))
+
     def test_unknown_or_plaintext_backends_are_rejected(self):
         with patch("noisechat.keys.keyring.get_keyring", return_value=MemoryKeyring()):
             with self.assertRaisesRegex(NoiseChatError, "Plaintext"):
@@ -222,6 +241,20 @@ class NotificationTests(unittest.TestCase):
                     patch("noisechat.client._ancestor_pids", return_value={42}), \
                     patch("noisechat.client.subprocess.run", return_value=CompletedProcess([], status, response)):
                 self.assertIsNone(_linux_window_is_focused())
+
+    def test_kde_focus_probe_preserves_wayland_priority_and_x11_fallback(self):
+        for session, available, expected in (
+                ("wayland", {"kdotool", "xdotool"}, "kdotool"),
+                ("x11", {"kdotool", "xdotool"}, "xdotool"),
+                ("wayland", {"xdotool"}, "xdotool"),
+                ("x11", {"kdotool"}, "kdotool")):
+            with self.subTest(session=session, available=available), \
+                    patch.dict("noisechat.client.os.environ", {"XDG_SESSION_TYPE": session, "XDG_CURRENT_DESKTOP": "KDE"}, clear=True), \
+                    patch("noisechat.client.shutil.which", side_effect=lambda name: f"/usr/bin/{name}" if name in available else None), \
+                    patch("noisechat.client._ancestor_pids", return_value={42}), \
+                    patch("noisechat.client._focus_pid", return_value=42) as focus:
+                self.assertTrue(_linux_window_is_focused())
+            focus.assert_called_once_with([f"/usr/bin/{expected}", "getactivewindow", "getwindowpid"])
 
     def test_windows_focus_handle_survives_title_change(self):
         import ctypes
