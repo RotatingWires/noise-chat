@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .auth import PasswordVerifier, password_bytes
-from .client import Client, Presence, Receiver, notify_new_message, terminal_text
+from .client import Client, Presence, Receiver, notify_message_attention, terminal_text
 from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
 from .terminal import chat_input
@@ -167,7 +167,7 @@ def join_command(args) -> None:
             print(text, flush=True)
 
     with chat_input() as read_message:
-        receiver = Receiver(client, output, notify_new_message)
+        receiver = Receiver(client, output, notify_message_attention)
         stop = threading.Event()
         presence = Presence(client, args.name, output, stop)
         thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)

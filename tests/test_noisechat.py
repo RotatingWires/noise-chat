@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from noisechat import cli
 from noisechat.auth import PasswordVerifier, RelayAccess, ServerAccessError, SESSION_SECONDS
-from noisechat.client import Client, Presence, Receiver, _desktop_notification, notify_new_message, terminal_text
+from noisechat.client import Client, Presence, Receiver, _desktop_notification, notify_message_attention, terminal_text
 from noisechat.crypto import (ChannelDeletedError, NoiseChatError, b64decode, b64encode, decrypt_key_file,
                               decrypt_message, encrypt_event, encrypt_key_file, encrypt_message, generate_key, room_id)
 from noisechat.keys import KeyStore, native_backend, read_key_file, write_key_file
@@ -193,6 +193,15 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(command[:4], ["/usr/bin/notify-send", "--app-name=NoiseChat", "--urgency=normal", "--expire-time=5000"])
         self.assertEqual(command[-2:], ["NoiseChat", "New message received."])
 
+    def test_hyprland_notification_uses_hyprctl(self):
+        with patch("noisechat.client.sys.platform", "linux"), \
+                patch.dict("noisechat.client.os.environ", {"HYPRLAND_INSTANCE_SIGNATURE": "instance"}, clear=True), \
+                patch("noisechat.client.shutil.which", side_effect=lambda name: "/usr/bin/hyprctl" if name == "hyprctl" else None), \
+                patch("noisechat.client.subprocess.Popen") as launch:
+            _desktop_notification()
+        self.assertEqual(launch.call_args.args[0], ["/usr/bin/hyprctl", "notify", "-1", "5000", "rgb(80aaff)",
+                                                     "NoiseChat: New message received."])
+
     def test_windows_notification_uses_powershell_toast(self):
         with patch("noisechat.client.sys.platform", "win32"), \
                 patch("noisechat.client.shutil.which", side_effect=lambda name: "powershell.exe" if name == "powershell.exe" else None), \
@@ -207,7 +216,7 @@ class NotificationTests(unittest.TestCase):
                 patch("noisechat.client._flash_windows_taskbar") as flash, \
                 patch("noisechat.client._desktop_notification") as popup, \
                 patch("builtins.print"):
-            notify_new_message()
+            notify_message_attention()
         flash.assert_called_once_with()
         popup.assert_called_once_with()
 
@@ -298,12 +307,12 @@ class RelayTests(unittest.TestCase):
     def test_receiver_notifies_only_for_remote_text_messages(self):
         notifications = []
         output = []
-        bell = object()
-        receiver = Receiver(self.bob, output.append, lambda: notifications.append(bell))
+        attention = object()
+        receiver = Receiver(self.bob, output.append, lambda: notifications.append(attention))
         self.bob.send("Bob", "local message")
         self.alice.send("Alice", "remote message")
         self.assertEqual(receiver.receive(0), 2)
-        self.assertEqual(notifications, [bell])
+        self.assertEqual(notifications, [attention])
         self.assertIn("Bob: local message", output[0])
         self.assertIn("Alice: remote message", output[1])
 
