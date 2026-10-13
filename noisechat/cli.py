@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .auth import PasswordVerifier, password_bytes
-from .client import Client, Presence, Receiver, terminal_text
+from .client import Client, Presence, Receiver, notify_new_message, terminal_text
 from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
 from .terminal import chat_input
@@ -109,8 +109,8 @@ def read_text(use_stdin: bool) -> str:
 
 def key_command(args) -> None:
     store = KeyStore()
-    check_alias(args.chat)
     if args.key_action == "create":
+        check_alias(args.chat)
         if args.no_store and not args.export:
             raise NoiseChatError("--no-store requires --export so you keep the new key.")
         if args.export and args.export.exists():
@@ -126,21 +126,33 @@ def key_command(args) -> None:
             print("Encrypted key file written. Share it and its passphrase with your friends in person.")
         print("Room:", room_id(key))
     elif args.key_action == "import":
+        check_alias(args.chat)
         data = read_key_file(args.file)
         key = decrypt_key_file(data, read_passphrase("Key-file passphrase: "))
         store.put(args.chat, key, replace=args.replace)
         print("Key imported into the OS keyring. Room:", room_id(key))
     elif args.key_action == "export":
+        check_alias(args.chat)
         key = store.get(args.chat)
         write_key_file(args.file, encrypt_key_file(key, new_passphrase()))
         print("Encrypted key file written. The raw chat key was not written to disk.")
     elif args.key_action == "remove":
+        check_alias(args.chat)
         store.remove(args.chat)
         print("Local key removed. Existing exports and your friends' copies remain usable.")
     elif args.key_action == "info":
+        check_alias(args.chat)
         key = load_key(args)
         print("Room:", room_id(key))
         print("Compare this room ID with a friend's to confirm that you imported the same key.")
+    elif args.key_action == "list":
+        entries = store.list()
+        if not entries:
+            print("No local chat keys.")
+            return
+        print(f"{'CHAT':<24}  ROOM ID")
+        for alias, identity in entries:
+            print(f"{alias:<24}  {identity}")
 
 
 def join_command(args) -> None:
@@ -155,7 +167,7 @@ def join_command(args) -> None:
             print(text, flush=True)
 
     with chat_input() as read_message:
-        receiver = Receiver(client, output)
+        receiver = Receiver(client, output, notify_new_message)
         stop = threading.Event()
         presence = Presence(client, args.name, output, stop)
         thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)
@@ -253,6 +265,7 @@ def parser() -> argparse.ArgumentParser:
     info = actions.add_parser("info", help="show the room ID, never the secret key")
     info.add_argument("chat")
     info.add_argument("--key-file", type=Path)
+    actions.add_parser("list", help="list local chat aliases and their room IDs")
 
     users = commands.add_parser("users", help="list connected users and their channels (requires each channel's key)")
     users.add_argument("chats", nargs="+", metavar="CHAT", help="local names of channels to list")

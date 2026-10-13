@@ -1,15 +1,17 @@
 """Use native credential stores, never a plaintext keyring fallback."""
 
 import os
+import json
 import re
 from pathlib import Path
 
 import keyring
 from keyring.errors import KeyringError
 
-from .crypto import NoiseChatError, b64decode, b64encode, check_key
+from .crypto import NoiseChatError, b64decode, b64encode, check_key, room_id
 
 SERVICE = "noisechat.chat-key.v1"
+INDEX_ALIAS = "__noisechat_alias_index__"
 NATIVE_MODULES = {
     "keyring.backends.Windows", "keyring.backends.SecretService",
     "keyring.backends.libsecret", "keyring.backends.kwallet", "keyring.backends.macOS",
@@ -19,6 +21,13 @@ NATIVE_MODULES = {
 def check_alias(alias: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", alias):
         raise NoiseChatError("Chat names use 1–64 letters, numbers, dots, underscores, or hyphens.")
+    return alias
+
+
+def _check_user_alias(alias: str) -> str:
+    check_alias(alias)
+    if alias == INDEX_ALIAS:
+        raise NoiseChatError("That chat name is reserved for NoiseChat's local key index.")
     return alias
 
 
@@ -35,7 +44,7 @@ def native_backend():
 
 class KeyStore:
     def get(self, alias: str) -> bytes:
-        check_alias(alias)
+        _check_user_alias(alias)
         try:
             value = native_backend().get_password(SERVICE, alias)
         except KeyringError:
@@ -47,23 +56,66 @@ class KeyStore:
         return key
 
     def put(self, alias: str, key: bytes, replace: bool = False) -> None:
-        check_alias(alias)
+        _check_user_alias(alias)
         check_key(key)
         try:
             backend = native_backend()
             if backend.get_password(SERVICE, alias) is not None and not replace:
                 raise NoiseChatError("That chat already has a key. Use another name or --replace explicitly.")
             backend.set_password(SERVICE, alias, b64encode(key))
+            aliases = self._aliases(backend)
+            if alias not in aliases:
+                aliases.append(alias)
+                self._save_aliases(backend, aliases)
         except KeyringError:
             raise NoiseChatError("Could not save the key in the OS keyring.") from None
 
     def remove(self, alias: str) -> None:
-        check_alias(alias)
+        _check_user_alias(alias)
         self.get(alias)
         try:
-            native_backend().delete_password(SERVICE, alias)
+            backend = native_backend()
+            backend.delete_password(SERVICE, alias)
+            self._save_aliases(backend, [item for item in self._aliases(backend) if item != alias])
         except KeyringError:
             raise NoiseChatError("Could not remove the key from the OS keyring.") from None
+
+    def list(self) -> list[tuple[str, str]]:
+        """Return local aliases and room IDs without exposing any key material."""
+        try:
+            backend = native_backend()
+            aliases = self._aliases(backend)
+            result = []
+            valid = []
+            for alias in aliases:
+                try:
+                    key = self.get(alias)
+                except NoiseChatError:
+                    continue
+                valid.append(alias)
+                result.append((alias, room_id(key)))
+            if valid != aliases:
+                self._save_aliases(backend, valid)
+            return result
+        except KeyringError:
+            raise NoiseChatError("Could not unlock/read the OS keyring.") from None
+
+    @staticmethod
+    def _aliases(backend) -> list[str]:
+        raw = backend.get_password(SERVICE, INDEX_ALIAS)
+        if raw is None:
+            return []
+        try:
+            aliases = json.loads(raw)
+        except (TypeError, ValueError, UnicodeError):
+            return []
+        if not isinstance(aliases, list):
+            return []
+        return [alias for alias in aliases if isinstance(alias, str) and alias != INDEX_ALIAS and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", alias)]
+
+    @staticmethod
+    def _save_aliases(backend, aliases: list[str]) -> None:
+        backend.set_password(SERVICE, INDEX_ALIAS, json.dumps(aliases, separators=(",", ":")))
 
 
 def read_key_file(path: Path) -> bytes:

@@ -2,6 +2,7 @@
 
 import json
 import secrets
+import sys
 import threading
 import unicodedata
 from collections import OrderedDict
@@ -128,8 +129,11 @@ class Client:
         if type(value.get("joined")) is not bool:
             raise NoiseChatError("Relay returned an invalid presence receipt.")
 
-    def disconnect(self, token: str) -> None:
-        value = self.request("POST", body={"token": token}, resource="presence", timeout=5)
+    def disconnect(self, token: str, sender: str | None = None) -> None:
+        body = {"token": token}
+        if sender is not None:
+            body["announcement"] = encrypt_event(self.key, sender, "leave")
+        value = self.request("POST", body=body, resource="presence", timeout=5)
         if value.get("left") is not True:
             raise NoiseChatError("Relay returned an invalid departure receipt.")
 
@@ -184,7 +188,7 @@ class Presence:
         # Heartbeats use a five-second request timeout. Finish one before leaving.
         self.thread.join()
         try:
-            self.client.disconnect(self.token)
+            self.client.disconnect(self.token, self.sender)
         except NoiseChatError:
             self.output(f"[Could not confirm departure; online status expires within {PRESENCE_TTL} seconds.]")
 
@@ -198,12 +202,34 @@ def render_message(message: dict) -> str:
     timestamp = datetime.fromisoformat(message["sent_at"]).astimezone().strftime("%H:%M")
     if message["kind"] == "join":
         return f"[{timestamp}] [Wall] {terminal_text(message['sender'])} joined the chat."
+    if message["kind"] == "leave":
+        return f"[{timestamp}] [Wall] {terminal_text(message['sender'])} left the chat."
     return f"[{timestamp}] {terminal_text(message['sender'])}: {terminal_text(message['text'])}"
 
 
+def notify_new_message() -> None:
+    """Use the terminal bell and, on Windows, request a taskbar flash."""
+    try:
+        print("\a", end="", flush=True)
+    except OSError:
+        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            class FlashWindowInfo(ctypes.Structure):
+                _fields_ = [("window", ctypes.c_void_p), ("flags", ctypes.c_uint),
+                            ("count", ctypes.c_uint), ("timeout", ctypes.c_uint)]
+            window = ctypes.windll.kernel32.GetConsoleWindow()
+            if window:
+                ctypes.windll.user32.FlashWindowEx(ctypes.byref(FlashWindowInfo(window, 14, 3, 0)))
+        except (AttributeError, OSError, TypeError):
+            pass
+
+
 class Receiver:
-    def __init__(self, client: Client, output=print):
+    def __init__(self, client: Client, output=print, notify=None):
         self.client, self.output = client, output
+        self.notify = notify or (notify_new_message if output is print else lambda: None)
         self.cursor = 0
         self.seen = OrderedDict()
 
@@ -225,6 +251,7 @@ class Receiver:
             while len(self.seen) > 10000:
                 self.seen.popitem(last=False)
             self.output(render_message(message))
+            self.notify()
             count += 1
         return count
 

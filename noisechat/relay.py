@@ -139,9 +139,14 @@ class RelayStore:
             self.prune_presence()
             return [envelope for (channel, _), (envelope, _) in self.presence.items() if channel == room]
 
-    def disconnect(self, room: str, token: str) -> None:
+    def disconnect(self, room: str, token: str, announcement: str | None = None) -> None:
         with self.condition:
-            self.presence.pop((room, token), None)
+            session = (room, token)
+            if session in self.presence:
+                if announcement is not None:
+                    validate_envelope(announcement)
+                    self.post(room, announcement)
+                self.presence.pop(session, None)
 
     def channels(self) -> list[dict]:
         with self.condition:
@@ -372,11 +377,11 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             body = self.read_json()
             if resource == "presence":
-                if (not isinstance(body, dict) or set(body) not in ({"token"}, {"token", "envelope", "announcement"})
+                if (not isinstance(body, dict) or set(body) not in ({"token"}, {"token", "announcement"}, {"token", "envelope", "announcement"})
                         or not isinstance(body.get("token"), str) or not re.fullmatch(r"[0-9a-f]{64}", body["token"])):
                     raise NoiseChatError("Invalid presence request.")
-                if set(body) == {"token"}:
-                    self.server.store.disconnect(room, body["token"])
+                if set(body) in ({"token"}, {"token", "announcement"}):
+                    self.server.store.disconnect(room, body["token"], body.get("announcement"))
                     self.respond(200, {"left": True})
                 else:
                     joined = self.server.store.connect(room, body["token"], body["envelope"], body["announcement"])
