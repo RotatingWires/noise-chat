@@ -40,6 +40,7 @@ class Client:
             password_bytes(password)
         self.password = password
         self.token = None
+        self.sent_message_ids = OrderedDict()
         self.login_lock = threading.Lock()
         self.opener = build_opener(NoRedirects())
 
@@ -106,6 +107,12 @@ class Client:
         value = self.request("POST", body={"envelope": envelope})
         if type(value.get("sequence")) is not int or not 0 < value["sequence"] < 2**63:
             raise NoiseChatError("Relay returned an invalid message receipt.")
+        # The relay echoes ciphertext back to the sender. Remember accepted IDs
+        # so the local echo can be displayed without triggering a notification.
+        message_id = decrypt_message(self.key, envelope)["id"]
+        self.sent_message_ids[message_id] = None
+        while len(self.sent_message_ids) > 10000:
+            self.sent_message_ids.popitem(last=False)
         return value["sequence"]
 
     def poll(self, after: int, wait: int = 20) -> list[dict]:
@@ -250,8 +257,10 @@ class Receiver:
             self.seen[message["id"]] = None
             while len(self.seen) > 10000:
                 self.seen.popitem(last=False)
+            local_message = message["id"] in getattr(self.client, "sent_message_ids", ())
             self.output(render_message(message))
-            self.notify()
+            if message["kind"] == "text" and not local_message:
+                self.notify()
             count += 1
         return count
 

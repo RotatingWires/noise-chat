@@ -266,6 +266,18 @@ class RelayTests(unittest.TestCase):
         other = self.client(generate_key())
         self.assertEqual(other.poll(0, wait=0), [])
 
+    def test_receiver_notifies_only_for_remote_text_messages(self):
+        notifications = []
+        output = []
+        bell = object()
+        receiver = Receiver(self.bob, output.append, lambda: notifications.append(bell))
+        self.bob.send("Bob", "local message")
+        self.alice.send("Alice", "remote message")
+        self.assertEqual(receiver.receive(0), 2)
+        self.assertEqual(notifications, [bell])
+        self.assertIn("Bob: local message", output[0])
+        self.assertIn("Alice: remote message", output[1])
+
     def test_join_wall_and_roster_are_encrypted_and_channel_scoped(self):
         token = "a" * 64
         self.alice.connect(token, "Alice")
@@ -560,6 +572,7 @@ class RelayTests(unittest.TestCase):
             with patch("noisechat.cli.Client",return_value=self.bob),contextlib.redirect_stdout(output),patch("builtins.input",side_effect=chat_input):
                 self.assertEqual(cli.main(["join","friends","--server","http://relay.test","--name","Bob"]),0)
             self.assertIn("Bob: live chat works",output.getvalue())
+            self.assertIn("Use /users to list users in this channel, and /quit to quit.", output.getvalue())
         self.assertNotIn(b"live chat works",b"".join(self.wire.requests))
 
     def test_history_retention_duplicates_and_restart(self):
