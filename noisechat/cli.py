@@ -172,7 +172,8 @@ def join_command(args) -> None:
         presence = Presence(client, args.name, output, stop)
         thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)
         presence.start()
-        print(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter. /users lists users; /quit exits.")
+        print(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter.")
+        print("Use /users to list users in this channel, and /quit to quit.")
         print("Names are chosen by key holders, not verified identities.")
         thread.start()
         try:
