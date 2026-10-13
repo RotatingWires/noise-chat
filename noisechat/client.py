@@ -104,15 +104,19 @@ class Client:
 
     def send(self, sender: str, text: str) -> int:
         envelope = encrypt_message(self.key, sender, text)
-        value = self.request("POST", body={"envelope": envelope})
-        if type(value.get("sequence")) is not int or not 0 < value["sequence"] < 2**63:
-            raise NoiseChatError("Relay returned an invalid message receipt.")
-        # The relay echoes ciphertext back to the sender. Remember accepted IDs
-        # so the local echo can be displayed without triggering a notification.
+        # The relay echoes ciphertext back to the sender. Remember local IDs
+        # before posting so a fast poll cannot ring for the local echo.
         message_id = decrypt_message(self.key, envelope)["id"]
         self.sent_message_ids[message_id] = None
         while len(self.sent_message_ids) > 10000:
             self.sent_message_ids.popitem(last=False)
+        try:
+            value = self.request("POST", body={"envelope": envelope})
+            if type(value.get("sequence")) is not int or not 0 < value["sequence"] < 2**63:
+                raise NoiseChatError("Relay returned an invalid message receipt.")
+        except NoiseChatError:
+            self.sent_message_ids.pop(message_id, None)
+            raise
         return value["sequence"]
 
     def poll(self, after: int, wait: int = 20) -> list[dict]:
