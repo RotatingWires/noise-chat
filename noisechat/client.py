@@ -343,9 +343,9 @@ def _ancestor_pids() -> set[int]:
     return pids
 
 
-def _focus_pid(command: list[str]) -> int | None:
+def _focus_pid(command: list[str], timeout: float = 1.0) -> int | None:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=.2, check=False)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
         if result.returncode != 0:
             return None
         return int(result.stdout.strip())
@@ -365,11 +365,17 @@ def _linux_window_is_focused() -> bool | None:
             return isinstance(active_pid, int) and active_pid in ancestors
         except (OSError, ValueError, TypeError, subprocess.SubprocessError):
             return None
+    kde_wayland = (os.environ.get("XDG_SESSION_TYPE", "").casefold() == "wayland"
+                   and (os.environ.get("KDE_FULL_SESSION") or os.environ.get("KDE_SESSION_VERSION")
+                        or "kde" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()))
+    kdotool = shutil.which("kdotool")
+    if kde_wayland and kdotool:
+        active_pid = _focus_pid([kdotool, "getactivewindow", "getwindowpid"])
+        return active_pid in ancestors if active_pid is not None else None
     xdotool = shutil.which("xdotool")
     if xdotool:
         active_pid = _focus_pid([xdotool, "getactivewindow", "getwindowpid"])
         return active_pid in ancestors if active_pid is not None else None
-    kdotool = shutil.which("kdotool")
     if kdotool:
         active_pid = _focus_pid([kdotool, "getactivewindow", "getwindowpid"])
         return active_pid in ancestors if active_pid is not None else None
