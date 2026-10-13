@@ -213,12 +213,21 @@ class NotificationTests(unittest.TestCase):
 
     def test_windows_attention_runs_flash_and_popup(self):
         with patch("noisechat.client.sys.platform", "win32"), \
+                patch("noisechat.client._window_is_focused", return_value=False), \
                 patch("noisechat.client._flash_windows_taskbar") as flash, \
                 patch("noisechat.client._desktop_notification") as popup, \
                 patch("builtins.print"):
             notify_message_attention()
         flash.assert_called_once_with()
         popup.assert_called_once_with()
+
+    def test_focused_window_suppresses_attention(self):
+        with patch("noisechat.client._window_is_focused", return_value=True), \
+                patch("noisechat.client._flash_windows_taskbar") as flash, \
+                patch("noisechat.client._desktop_notification") as popup:
+            notify_message_attention()
+        flash.assert_not_called()
+        popup.assert_not_called()
 
 
 class WireSocket:

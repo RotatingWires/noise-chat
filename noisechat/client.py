@@ -245,7 +245,19 @@ def _windows_taskbar_window(ctypes):
         window = user32.FindWindowW(None, title.value)
         if window and user32.IsWindowVisible(window):
             return window
-    return kernel32.GetConsoleWindow()
+    window = kernel32.GetConsoleWindow()
+    return window if window and user32.IsWindowVisible(window) else None
+
+
+def _windows_window_is_focused() -> bool | None:
+    try:
+        import ctypes
+        window = _windows_taskbar_window(ctypes)
+        if not window:
+            return None
+        return ctypes.windll.user32.GetForegroundWindow() == window
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
 
 
 def _flash_windows_taskbar() -> None:
@@ -311,8 +323,80 @@ def _desktop_notification() -> None:
         _spawn_background([kdialog, "--title", "NoiseChat", "--passivepopup", "New message received.", "5"])
 
 
+def _ancestor_pids() -> set[int]:
+    """Return this process and its Linux/macOS parent chain where available."""
+    pids = set()
+    current = os.getpid()
+    while current > 1 and current not in pids:
+        pids.add(current)
+        try:
+            if sys.platform.startswith("linux"):
+                with open(f"/proc/{current}/stat", encoding="ascii") as stat_file:
+                    fields = stat_file.read().rsplit(") ", 1)[1].split()
+                current = int(fields[1])
+            else:
+                result = subprocess.run(["ps", "-o", "ppid=", "-p", str(current)], capture_output=True,
+                                        text=True, timeout=.2, check=False)
+                current = int(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip() else 1
+        except (OSError, ValueError, subprocess.SubprocessError, IndexError):
+            break
+    return pids
+
+
+def _focus_pid(command: list[str]) -> int | None:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=.2, check=False)
+        if result.returncode != 0:
+            return None
+        return int(result.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _linux_window_is_focused() -> bool | None:
+    ancestors = _ancestor_pids()
+    hyprctl = shutil.which("hyprctl")
+    if hyprctl and (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or
+                    "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
+        try:
+            result = subprocess.run([hyprctl, "activewindow", "-j"], capture_output=True, text=True,
+                                    timeout=.2, check=False)
+            active_pid = json.loads(result.stdout).get("pid") if result.returncode == 0 else None
+            return isinstance(active_pid, int) and active_pid in ancestors
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            return None
+    xdotool = shutil.which("xdotool")
+    if xdotool:
+        active_pid = _focus_pid([xdotool, "getactivewindow", "getwindowpid"])
+        return active_pid in ancestors if active_pid is not None else None
+    kdotool = shutil.which("kdotool")
+    if kdotool:
+        active_pid = _focus_pid([kdotool, "getactivewindow", "getwindowpid"])
+        return active_pid in ancestors if active_pid is not None else None
+    return None
+
+
+def _mac_window_is_focused() -> bool | None:
+    osascript = shutil.which("osascript")
+    if not osascript:
+        return None
+    active_pid = _focus_pid([osascript, "-e",
+                             'tell application "System Events" to unix id of first application process whose frontmost is true'])
+    return active_pid in _ancestor_pids() if active_pid is not None else None
+
+
+def _window_is_focused() -> bool | None:
+    if sys.platform == "win32":
+        return _windows_window_is_focused()
+    if sys.platform == "darwin":
+        return _mac_window_is_focused()
+    return _linux_window_is_focused()
+
+
 def notify_message_attention() -> None:
     """Request desktop attention for a received message."""
+    if _window_is_focused() is not False:
+        return
     if sys.platform == "win32":
         _flash_windows_taskbar()
     _desktop_notification()
