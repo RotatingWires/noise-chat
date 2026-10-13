@@ -17,7 +17,8 @@ from urllib.parse import urlsplit
 
 from noisechat import cli
 from noisechat.auth import PasswordVerifier, RelayAccess, ServerAccessError, SESSION_SECONDS
-from noisechat.client import Client, Presence, Receiver, _desktop_notification, notify_message_attention, terminal_text
+from noisechat.client import (Client, Presence, Receiver, _desktop_notification, _show_attention_title,
+                              clear_attention_title, notify_message_attention, terminal_text)
 from noisechat.crypto import (ChannelDeletedError, NoiseChatError, b64decode, b64encode, decrypt_key_file,
                               decrypt_message, encrypt_event, encrypt_key_file, encrypt_message, generate_key, room_id)
 from noisechat.keys import KeyStore, native_backend, read_key_file, write_key_file
@@ -197,10 +198,32 @@ class NotificationTests(unittest.TestCase):
         with patch("noisechat.client.sys.platform", "linux"), \
                 patch.dict("noisechat.client.os.environ", {"HYPRLAND_INSTANCE_SIGNATURE": "instance"}, clear=True), \
                 patch("noisechat.client.shutil.which", side_effect=lambda name: "/usr/bin/hyprctl" if name == "hyprctl" else None), \
-                patch("noisechat.client.subprocess.Popen") as launch:
+                patch("noisechat.client.subprocess.run") as launch:
+            launch.return_value.returncode = 0
             _desktop_notification()
         self.assertEqual(launch.call_args.args[0], ["/usr/bin/hyprctl", "notify", "-1", "5000", "rgb(80aaff)",
                                                      "NoiseChat: New message received."])
+
+    def test_hyprland_notification_falls_back_when_hyprctl_fails(self):
+        with patch("noisechat.client.sys.platform", "linux"), \
+                patch.dict("noisechat.client.os.environ", {"HYPRLAND_INSTANCE_SIGNATURE": "instance"}, clear=True), \
+                patch("noisechat.client.shutil.which", side_effect=lambda name: {
+                    "hyprctl": "/usr/bin/hyprctl", "notify-send": "/usr/bin/notify-send"}.get(name)), \
+                patch("noisechat.client.subprocess.run") as run, \
+                patch("noisechat.client.subprocess.Popen") as launch:
+            run.return_value.returncode = 1
+            _desktop_notification()
+        self.assertEqual(launch.call_args.args[0][:4], ["/usr/bin/notify-send", "--app-name=NoiseChat",
+                                                         "--urgency=normal", "--expire-time=5000"])
+
+    def test_attention_title_is_cleared(self):
+        with patch("noisechat.client._window_is_focused", return_value=None), \
+                patch("noisechat.client._set_terminal_title") as set_title, \
+                patch("noisechat.client._restore_terminal_title") as restore:
+            _show_attention_title()
+            clear_attention_title()
+        set_title.assert_called_once_with("New Message - NoiseChat")
+        restore.assert_called_once_with()
 
     def test_windows_notification_uses_powershell_toast(self):
         with patch("noisechat.client.sys.platform", "win32"), \
@@ -214,6 +237,7 @@ class NotificationTests(unittest.TestCase):
     def test_windows_attention_runs_flash_and_popup(self):
         with patch("noisechat.client.sys.platform", "win32"), \
                 patch("noisechat.client._window_is_focused", return_value=False), \
+                patch("noisechat.client._show_attention_title"), \
                 patch("noisechat.client._flash_windows_taskbar") as flash, \
                 patch("noisechat.client._desktop_notification") as popup, \
                 patch("builtins.print"):
