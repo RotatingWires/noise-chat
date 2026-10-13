@@ -17,7 +17,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .auth import ServerAccessError, password_bytes
-from .crypto import (MAX_ENVELOPE_CHARS, MAX_PRESENCE_PER_ROOM, PRESENCE_HEARTBEAT, PRESENCE_TTL,
+from .crypto import (MAX_ENVELOPE_CHARS, MAX_POLL_MESSAGES, MAX_PRESENCE_PER_ROOM, PRESENCE_HEARTBEAT, PRESENCE_TTL,
                      ChannelDeletedError, NoiseChatError, decrypt_message, encrypt_event, encrypt_message, room_id)
 
 
@@ -126,7 +126,7 @@ class Client:
     def poll(self, after: int, wait: int = 20) -> list[dict]:
         value = self.request("GET", query={"after": after, "wait": wait})
         messages = value.get("messages")
-        if not isinstance(messages, list) or len(messages) > 100:
+        if not isinstance(messages, list) or len(messages) > MAX_POLL_MESSAGES:
             raise NoiseChatError("Relay returned an invalid message batch.")
         last = after
         for message in messages:
@@ -305,6 +305,13 @@ $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\power
 """.strip()
 
 
+def _hyprland_control() -> str | None:
+    if (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or
+            "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
+        return shutil.which("hyprctl")
+    return None
+
+
 def _desktop_notification() -> None:
     """Best-effort popup using the platform's already-installed notification service."""
     if sys.platform == "win32":
@@ -325,9 +332,8 @@ def _desktop_notification() -> None:
             _spawn_background([command, "--app-name=NoiseChat", "--urgency=normal", "--expire-time=5000",
                                "NoiseChat", "New message received."])
             return
-    hyprctl = shutil.which("hyprctl")
-    if hyprctl and (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or
-                    "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
+    hyprctl = _hyprland_control()
+    if hyprctl:
         _spawn_background([hyprctl, "notify", "-1", "5000", "rgb(80aaff)",
                            "NoiseChat: New message received."])
         return
@@ -357,9 +363,9 @@ def _ancestor_pids() -> set[int]:
     return pids
 
 
-def _focus_pid(command: list[str], timeout: float = 1.0) -> int | None:
+def _focus_pid(command: list[str]) -> int | None:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=1, check=False)
         if result.returncode != 0:
             return None
         return int(result.stdout.strip())
@@ -369,9 +375,8 @@ def _focus_pid(command: list[str], timeout: float = 1.0) -> int | None:
 
 def _linux_window_is_focused() -> bool | None:
     ancestors = _ancestor_pids()
-    hyprctl = shutil.which("hyprctl")
-    if hyprctl and (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or
-                    "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
+    hyprctl = _hyprland_control()
+    if hyprctl:
         try:
             result = subprocess.run([hyprctl, "activewindow", "-j"], capture_output=True, text=True,
                                     timeout=1, check=False)
@@ -388,15 +393,9 @@ def _linux_window_is_focused() -> bool | None:
                    and (os.environ.get("KDE_FULL_SESSION") or os.environ.get("KDE_SESSION_VERSION")
                         or "kde" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()))
     kdotool = shutil.which("kdotool")
-    if kde_wayland and kdotool:
-        active_pid = _focus_pid([kdotool, "getactivewindow", "getwindowpid"])
-        return active_pid in ancestors if active_pid is not None else None
-    xdotool = shutil.which("xdotool")
-    if xdotool:
-        active_pid = _focus_pid([xdotool, "getactivewindow", "getwindowpid"])
-        return active_pid in ancestors if active_pid is not None else None
-    if kdotool:
-        active_pid = _focus_pid([kdotool, "getactivewindow", "getwindowpid"])
+    command = kdotool if kde_wayland and kdotool else shutil.which("xdotool") or kdotool
+    if command:
+        active_pid = _focus_pid([command, "getactivewindow", "getwindowpid"])
         return active_pid in ancestors if active_pid is not None else None
     return None
 

@@ -17,6 +17,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 MAX_TEXT_BYTES = 4096
+MAX_KEY_FILE_BYTES = 4096
+MAX_POLL_MESSAGES = 100
 MAX_PADDED_BYTES = 8192
 MAX_ENVELOPE_CHARS = 11000
 PRESENCE_TTL = 60
@@ -173,7 +175,7 @@ def encrypt_key_file(key: bytes, password: str) -> bytes:
 
 
 def decrypt_key_file(data: bytes, password: str) -> bytes:
-    if len(data) > 4096:
+    if len(data) > MAX_KEY_FILE_BYTES:
         raise NoiseChatError("Key file is too large.")
     try:
         document = json.loads(data)

@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .auth import PasswordVerifier, RelayAccess
-from .crypto import MAX_PRESENCE_PER_ROOM, PRESENCE_TTL, ChannelDeletedError, NoiseChatError, validate_envelope
+from .crypto import MAX_POLL_MESSAGES, MAX_PRESENCE_PER_ROOM, PRESENCE_TTL, ChannelDeletedError, NoiseChatError, validate_envelope
 
 MAX_REQUEST_BYTES = 16384
 MAX_PRESENCE = 1000
@@ -180,7 +180,7 @@ class RelayStore:
         with self.condition:
             while not self.closed:
                 self.check_available(room)
-                rows = self.connection.execute("SELECT sequence,envelope FROM messages WHERE room=? AND sequence>? ORDER BY sequence LIMIT 100", (room, after)).fetchall()
+                rows = self.connection.execute("SELECT sequence,envelope FROM messages WHERE room=? AND sequence>? ORDER BY sequence LIMIT ?", (room, after, MAX_POLL_MESSAGES)).fetchall()
                 if rows or time.monotonic() >= deadline:
                     return [{"sequence": sequence, "envelope": envelope} for sequence, envelope in rows]
                 self.condition.wait(max(0, deadline - time.monotonic()))

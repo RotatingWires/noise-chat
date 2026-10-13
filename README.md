@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.13
+# NoiseChat v0.4.14
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -216,7 +216,7 @@ Usernames and join/leave announcements remain encrypted. You need each channel's
 
 Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately and publishes a leave announcement; after a crash or lost connection it expires within 60 seconds of the last accepted refresh without publishing a leave event. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join/leave notices are retained like chat messages, so use `users` for current online status.
 
-Upgrade both the relay and clients to v0.4.13 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
+Upgrade both the relay and clients to v0.4.14 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
 
 ## Give a friend access
 
@@ -361,7 +361,7 @@ Only enable this mode for a listener used by your trusted local connector. Loopb
 
 #### Set it up
 
-1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.13 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
+1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.14 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
 2. Start NoiseChat on the machine that will run `cloudflared`:
 
    ```sh
@@ -464,7 +464,16 @@ python -m compileall -q noisechat tests
 
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
-`pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+`pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats and shared protocol/file limits, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.14
+
+- Consolidate Hyprland detection and the KDE/X11 focus-probe branches.
+- Reuse the selected keyring while listing keys; share alias validation and remove unreachable reserved-name checks.
+- Share message, key-file, password-file, and polling limits between their producers and consumers.
+- Remove redundant CLI alias checks and an unused focus-timeout parameter.
+- Preserve notification/title behavior, history ordering, encrypted formats, older-client compatibility, and relay retention.
+- Audit found no orphan source files or unused imports; add no runtime dependencies.
 
 ## v0.4.13
 

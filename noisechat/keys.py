@@ -8,10 +8,11 @@ from pathlib import Path
 import keyring
 from keyring.errors import KeyringError
 
-from .crypto import NoiseChatError, b64decode, b64encode, check_key, room_id
+from .crypto import MAX_KEY_FILE_BYTES, NoiseChatError, b64decode, b64encode, check_key, room_id
 
 SERVICE = "noisechat.chat-key.v1"
 INDEX_ALIAS = "__noisechat_alias_index__"
+ALIAS_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 NATIVE_MODULES = {
     "keyring.backends.Windows", "keyring.backends.SecretService",
     "keyring.backends.libsecret", "keyring.backends.kwallet", "keyring.backends.macOS",
@@ -19,15 +20,8 @@ NATIVE_MODULES = {
 
 
 def check_alias(alias: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", alias):
+    if not ALIAS_PATTERN.fullmatch(alias):
         raise NoiseChatError("Chat names use 1–64 letters, numbers, dots, underscores, or hyphens.")
-    return alias
-
-
-def _check_user_alias(alias: str) -> str:
-    check_alias(alias)
-    if alias == INDEX_ALIAS:
-        raise NoiseChatError("That chat name is reserved for NoiseChat's local key index.")
     return alias
 
 
@@ -44,19 +38,14 @@ def native_backend():
 
 class KeyStore:
     def get(self, alias: str) -> bytes:
-        _check_user_alias(alias)
+        check_alias(alias)
         try:
-            value = native_backend().get_password(SERVICE, alias)
+            return self._read_key(native_backend(), alias)
         except KeyringError:
             raise NoiseChatError("Could not unlock/read the OS keyring.") from None
-        if value is None:
-            raise NoiseChatError("Chat key not found. Create it or import your friend's encrypted key file.")
-        key = b64decode(value)
-        check_key(key)
-        return key
 
     def put(self, alias: str, key: bytes, replace: bool = False) -> None:
-        _check_user_alias(alias)
+        check_alias(alias)
         check_key(key)
         try:
             backend = native_backend()
@@ -71,7 +60,6 @@ class KeyStore:
             raise NoiseChatError("Could not save the key in the OS keyring.") from None
 
     def remove(self, alias: str) -> None:
-        _check_user_alias(alias)
         self.get(alias)
         try:
             backend = native_backend()
@@ -89,7 +77,7 @@ class KeyStore:
             valid = []
             for alias in aliases:
                 try:
-                    key = self.get(alias)
+                    key = self._read_key(backend, alias)
                 except NoiseChatError:
                     continue
                 valid.append(alias)
@@ -99,6 +87,18 @@ class KeyStore:
             return result
         except KeyringError:
             raise NoiseChatError("Could not unlock/read the OS keyring.") from None
+
+    @staticmethod
+    def _read_key(backend, alias: str) -> bytes:
+        try:
+            value = backend.get_password(SERVICE, alias)
+        except KeyringError:
+            raise NoiseChatError("Could not unlock/read the OS keyring.") from None
+        if value is None:
+            raise NoiseChatError("Chat key not found. Create it or import your friend's encrypted key file.")
+        key = b64decode(value)
+        check_key(key)
+        return key
 
     @staticmethod
     def _aliases(backend) -> list[str]:
@@ -111,7 +111,7 @@ class KeyStore:
             return []
         if not isinstance(aliases, list):
             return []
-        return [alias for alias in aliases if isinstance(alias, str) and alias != INDEX_ALIAS and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", alias)]
+        return [alias for alias in aliases if isinstance(alias, str) and ALIAS_PATTERN.fullmatch(alias)]
 
     @staticmethod
     def _save_aliases(backend, aliases: list[str]) -> None:
@@ -120,8 +120,8 @@ class KeyStore:
 
 def read_key_file(path: Path) -> bytes:
     with path.open("rb") as stream:
-        data = stream.read(4097)
-    if len(data) > 4096:
+        data = stream.read(MAX_KEY_FILE_BYTES + 1)
+    if len(data) > MAX_KEY_FILE_BYTES:
         raise NoiseChatError("Key file is too large.")
     return data
 

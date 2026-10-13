@@ -12,9 +12,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import __version__
-from .auth import PasswordVerifier, password_bytes
+from .auth import MAX_PASSWORD_BYTES, PasswordVerifier, password_bytes
 from .client import Client, Presence, Receiver, _window_is_focused, notify_message_attention, terminal_text
-from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
+from .crypto import MAX_TEXT_BYTES, NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
 from .terminal import TerminalAttention, chat_input
 
@@ -54,8 +54,8 @@ def read_server_password(args, prompt: str = "Server access password: ") -> str:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and info.st_mode & 0o077):
                 raise NoiseChatError("Use a regular server password file accessible only to its owner (chmod 600 on Unix).")
-            raw = stream.read(1027)
-        if len(raw) > 1026:
+            raw = stream.read(MAX_PASSWORD_BYTES + 3)
+        if len(raw) > MAX_PASSWORD_BYTES + 2:
             raise NoiseChatError("Server password file is too large.")
         try:
             password = raw.decode("utf-8").removesuffix("\n").removesuffix("\r")
@@ -97,8 +97,8 @@ def load_key(args) -> bytes:
 
 def read_text(use_stdin: bool) -> str:
     if use_stdin:
-        data = sys.stdin.buffer.read(4097)
-        if len(data) > 4096:
+        data = sys.stdin.buffer.read(MAX_TEXT_BYTES + 1)
+        if len(data) > MAX_TEXT_BYTES:
             raise NoiseChatError("Messages are limited to 4096 UTF-8 bytes.")
         try:
             return data.decode("utf-8").removesuffix("\n").removesuffix("\r")
@@ -132,16 +132,13 @@ def key_command(args) -> None:
         store.put(args.chat, key, replace=args.replace)
         print("Key imported into the OS keyring. Room:", room_id(key))
     elif args.key_action == "export":
-        check_alias(args.chat)
         key = store.get(args.chat)
         write_key_file(args.file, encrypt_key_file(key, new_passphrase()))
         print("Encrypted key file written. The raw chat key was not written to disk.")
     elif args.key_action == "remove":
-        check_alias(args.chat)
         store.remove(args.chat)
         print("Local key removed. Existing exports and your friends' copies remain usable.")
     elif args.key_action == "info":
-        check_alias(args.chat)
         key = load_key(args)
         print("Room:", room_id(key))
         print("Compare this room ID with a friend's to confirm that you imported the same key.")
