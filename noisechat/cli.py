@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .auth import PasswordVerifier, password_bytes
-from .client import Client, Presence, Receiver, notify_message_attention, terminal_text
+from .client import Client, Presence, Receiver, clear_attention_title, notify_message_attention, terminal_text
 from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
 from .terminal import chat_input
@@ -200,6 +200,7 @@ def join_command(args) -> None:
         finally:
             stop.set()
             presence.close()
+            clear_attention_title()
             # A receiver may be in a bounded long poll; it doesn't block CLI exit.
             thread.join(timeout=0.2)
 
