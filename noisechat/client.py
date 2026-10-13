@@ -235,8 +235,19 @@ def _spawn_background(command: list[str], windows: bool = False) -> None:
         pass
 
 
+_windows_terminal_window = None
+
+
 def _windows_taskbar_window(ctypes):
+    global _windows_terminal_window
+    from ctypes import wintypes
     kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    kernel32.GetConsoleWindow.restype = wintypes.HWND
+    if _windows_terminal_window and user32.IsWindowVisible(_windows_terminal_window):
+        return _windows_terminal_window
     # Windows Terminal hosts CLI programs in a pseudoconsole. Its
     # GetConsoleWindow result is not the visible taskbar window, so first
     # resolve the visible top-level window by the current console title.
@@ -244,6 +255,7 @@ def _windows_taskbar_window(ctypes):
     if kernel32.GetConsoleTitleW(title, len(title)):
         window = user32.FindWindowW(None, title.value)
         if window and user32.IsWindowVisible(window):
+            _windows_terminal_window = window
             return window
     window = kernel32.GetConsoleWindow()
     return window if window and user32.IsWindowVisible(window) else None
@@ -255,6 +267,8 @@ def _windows_window_is_focused() -> bool | None:
         window = _windows_taskbar_window(ctypes)
         if not window:
             return None
+        from ctypes import wintypes
+        ctypes.windll.user32.GetForegroundWindow.restype = wintypes.HWND
         return ctypes.windll.user32.GetForegroundWindow() == window
     except (AttributeError, OSError, TypeError, ValueError):
         return None
@@ -305,18 +319,18 @@ def _desktop_notification() -> None:
         if osascript:
             _spawn_background([osascript, "-e", "display notification \"New message received.\" with title \"NoiseChat\""])
         return
-    hyprctl = shutil.which("hyprctl")
-    if hyprctl and (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or
-                    "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
-        _spawn_background([hyprctl, "notify", "-1", "5000", "rgb(80aaff)",
-                           "NoiseChat: New message received."])
-        return
     for command_name in ("notify-send", "dunstify"):
         command = shutil.which(command_name)
         if command:
             _spawn_background([command, "--app-name=NoiseChat", "--urgency=normal", "--expire-time=5000",
                                "NoiseChat", "New message received."])
             return
+    hyprctl = shutil.which("hyprctl")
+    if hyprctl and (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or
+                    "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
+        _spawn_background([hyprctl, "notify", "-1", "5000", "rgb(80aaff)",
+                           "NoiseChat: New message received."])
+        return
     # KDE installations may have kdialog without libnotify's notify-send.
     kdialog = shutil.which("kdialog")
     if kdialog:
@@ -360,9 +374,14 @@ def _linux_window_is_focused() -> bool | None:
                     "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
         try:
             result = subprocess.run([hyprctl, "activewindow", "-j"], capture_output=True, text=True,
-                                    timeout=.2, check=False)
-            active_pid = json.loads(result.stdout).get("pid") if result.returncode == 0 else None
-            return isinstance(active_pid, int) and active_pid in ancestors
+                                    timeout=1, check=False)
+            if result.returncode != 0:
+                return None
+            value = json.loads(result.stdout)
+            if not isinstance(value, dict):
+                return None
+            active_pid = value.get("pid")
+            return active_pid in ancestors if type(active_pid) is int and active_pid > 0 else None
         except (OSError, ValueError, TypeError, subprocess.SubprocessError):
             return None
     kde_wayland = (os.environ.get("XDG_SESSION_TYPE", "").casefold() == "wayland"
