@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.4
+# NoiseChat v0.4.5
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -131,7 +131,7 @@ noisechat join friends --server "http://127.0.0.1:8713" --name Alice
 noisechat join friends --server "http://127.0.0.1:8713" --name Bob
 ```
 
-Type a message and press Enter. Everyone in the channel receives an encrypted `[Wall] Alice joined the chat.` announcement when Alice connects. `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and join announcements appear when you connect. Incoming messages appear above your current draft while you type. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
+Type a message and press Enter. Everyone in the channel receives encrypted `[Wall] Alice joined the chat.` and `[Wall] Alice left the chat.` announcements as participants connect and disconnect. `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and announcements appear when you connect. Incoming messages appear above your current draft while you type and trigger the terminal bell; on Windows, NoiseChat also requests a taskbar flash when the console supports it. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
 
 ## Command reference
 
@@ -147,6 +147,7 @@ Type a message and press Enter. Everyone in the channel receives an encrypted `[
 | `noisechat key import CHAT FILE` | Unlock a password-encrypted key file and save its key in the OS keyring. |
 | `noisechat key export CHAT FILE` | Write a password-encrypted copy of an existing key for USB distribution or backup. |
 | `noisechat key info CHAT` | Show the derived room ID so friends can compare keys, without printing the secret key. |
+| `noisechat key list` | List local key aliases and their derived room IDs without printing any key material. |
 | `noisechat key remove CHAT` | Delete your local keyring entry; other people's copies and exported files still work. |
 | `noisechat join CHAT --server "SERVER" --name NAME` | Join a channel, announce your arrival, and send and receive interactively. Keeps your online status refreshed while running. |
 | `noisechat users CHAT [CHAT ...] --server "SERVER"` | List all connected chat sessions and their channels for one or more shared keys you hold. |
@@ -203,11 +204,11 @@ noisechat users friends work --server "http://127.0.0.1:8713"
 
 The output has `USER` and `CHANNEL` columns. Channel labels are your local key aliases; two people can call the same channel different things. Duplicate aliases for the same shared key are listed once. Multiple connections using the same display name appear as separate sessions.
 
-Usernames and join announcements remain encrypted. You need each channel's key to identify its connected users; there is no public server-wide directory of plaintext names or channels. `users` itself does not join or announce a new user. Invalid encrypted roster entries are ignored.
+Usernames and join/leave announcements remain encrypted. You need each channel's key to identify its connected users; there is no public server-wide directory of plaintext names or channels. `users` itself does not join or announce a new user. Invalid encrypted roster entries are ignored.
 
-Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately; after a crash or lost connection it expires within 60 seconds of the last accepted refresh. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join notices are retained like chat messages, so use `users` for current online status.
+Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately and publishes a leave announcement; after a crash or lost connection it expires within 60 seconds of the last accepted refresh without publishing a leave event. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join/leave notices are retained like chat messages, so use `users` for current online status.
 
-Upgrade both the relay and clients to v0.2.0 for presence and join announcements. Older clients can still exchange text messages, but cannot interpret the new encrypted event types.
+Upgrade both the relay and clients to v0.4.5 for presence and join/leave announcements. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
 
 ## Give a friend access
 
@@ -234,6 +235,8 @@ Default client storage uses a native OS credential store:
 - macOS native Keychain is also accepted, although this release targets Windows/Linux.
 
 The client refuses unknown and plaintext keyring backends. Your keyring protects the key at rest according to its configuration; it can be accessible to programs running as your user while unlocked. It cannot protect a compromised client, and the chat key/plaintext necessarily exist in the client process's memory during use. Python does not guarantee secure memory erasure.
+
+`noisechat key list` reads a small alias index kept in the same native keyring and prints each local alias with its derived room ID. The index contains aliases only, never raw keys. Keys created or imported by older releases may not have an index entry; re-import them with `key import ... --replace` under the same alias to record them.
 
 If a Linux machine has no desktop keyring, keep only an encrypted key file and unlock it each time:
 
@@ -350,7 +353,7 @@ Only enable this mode for a listener used by your trusted local connector. Loopb
 
 #### Set it up
 
-1. Install/update NoiseChat from the checkout with `python -m pip install .`. The relay needs v0.4.1; clients need v0.4.0 or later for server-password login. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
+1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.5 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
 2. Start NoiseChat on the machine that will run `cloudflared`:
 
    ```sh
@@ -361,6 +364,7 @@ Only enable this mode for a listener used by your trusted local connector. Loopb
 3. In Cloudflare's dashboard, open **Networking → Tunnels**, create a tunnel, and follow the operating-system installation instructions to run `cloudflared` on this same machine. If you already have a connector/tunnel there, use it and add another route.
 4. Add a **Published application** route with your chosen hostname, for example `chat.example.com`, and service URL **`http://127.0.0.1:8713`**. The origin service is HTTP on loopback; the public client URL is HTTPS. If the form separates service type and address, select HTTP and enter `127.0.0.1:8713`.
 5. Keep Cloudflare's visitor-IP header enabled. Do not apply the **Remove visitor IP headers** transform to this hostname or remove/replace the header with another proxy or Worker. Tunnel mode rejects requests without a valid header.
+   If Cloudflare blocks the CLI before it reaches the tunnel, add a WAF rule for the NoiseChat hostname (or subdomain) that skips **Browser Integrity Check**. The CLI is not a browser and may be challenged by that check.
 6. Give friends the public HTTPS URL, server access password, and their channel's encrypted key export/passphrase. Once the chat key is imported, connect:
 
    ```sh
@@ -453,6 +457,13 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.5
+
+- Publish encrypted leave wall announcements for clean client disconnects.
+- Add `noisechat key list` for local key aliases and room IDs.
+- Add terminal-bell notifications for incoming messages and request Windows taskbar flashes when supported.
+- Document the Cloudflare Browser Integrity Check exception that may be needed for CLI traffic.
 
 ## v0.4.4
 

@@ -83,7 +83,7 @@ def validate_message(message: object) -> dict:
         raise NoiseChatError("Unsupported message format.")
     if not all(isinstance(message[field], str) for field in fields):
         raise NoiseChatError("Invalid message fields.")
-    if message["kind"] not in {"text", "join", "presence"}:
+    if message["kind"] not in {"text", "join", "leave", "presence"}:
         raise NoiseChatError("Unsupported message format.")
     if not re.fullmatch(r"[0-9a-f]{32}", message["id"]):
         raise NoiseChatError("Invalid message ID.")
@@ -106,7 +106,7 @@ def encrypt_message(key: bytes, sender: str, text: str) -> str:
 
 
 def encrypt_event(key: bytes, sender: str, kind: str) -> str:
-    if kind not in {"join", "presence"}:
+    if kind not in {"join", "leave", "presence"}:
         raise NoiseChatError("Unsupported presence event.")
     return _encrypt_message(key, sender, "", kind)
 

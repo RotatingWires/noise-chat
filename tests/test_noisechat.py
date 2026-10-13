@@ -121,6 +121,27 @@ class KeyTests(unittest.TestCase):
             with self.assertRaises(NoiseChatError):
                 store.get("friends")
 
+    def test_key_list_shows_local_aliases_and_room_ids_without_keys(self):
+        first, second = generate_key(), generate_key()
+        with patch("noisechat.keys.native_backend", return_value=MemoryKeyring()):
+            store = KeyStore()
+            store.put("friends", first)
+            store.put("work", second)
+            entries = store.list()
+        self.assertEqual(entries, [("friends", room_id(first)), ("work", room_id(second))])
+        self.assertNotIn(first.hex(), str(entries))
+
+    def test_key_list_cli_prints_aliases_and_room_ids(self):
+        key = generate_key()
+        output = io.StringIO()
+        with patch("noisechat.keys.native_backend", return_value=MemoryKeyring()):
+            KeyStore().put("friends", key)
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(cli.main(["key", "list"]), 0)
+        self.assertIn("friends", output.getvalue())
+        self.assertIn(room_id(key), output.getvalue())
+        self.assertNotIn(key.hex(), output.getvalue())
+
     def test_unknown_or_plaintext_backends_are_rejected(self):
         with patch("noisechat.keys.keyring.get_keyring", return_value=MemoryKeyring()):
             with self.assertRaisesRegex(NoiseChatError, "Plaintext"):
@@ -266,9 +287,10 @@ class RelayTests(unittest.TestCase):
         self.store.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.assertNotIn(b"Alice", self.path.read_bytes())
         self.assertNotIn(token.encode(), self.path.read_bytes())
-        self.alice.disconnect(token)
+        self.alice.disconnect(token, "Alice")
         self.assertEqual(self.bob.users(), [])
-        self.assertEqual(receiver.receive(0), 0)
+        self.assertEqual(receiver.receive(0), 1)
+        self.assertIn("[Wall] Alice left the chat.", output[-1])
 
     def test_refresh_expiry_and_rejoin_after_relay_restart(self):
         with patch("noisechat.relay.time.monotonic", return_value=100):
@@ -404,7 +426,7 @@ class RelayTests(unittest.TestCase):
             presence.close()
         self.assertGreaterEqual(len(self.wire.requests), 3)
         self.assertEqual(self.bob.users(), [])
-        self.assertEqual(len(self.bob.poll(0, 0)), 1, "Heartbeats must not fill message history.")
+        self.assertEqual(len(self.bob.poll(0, 0)), 2, "Heartbeats must not fill message history.")
         with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", return_value=self.bob), patch("builtins.input", side_effect=OSError("input failed")), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(["join", "friends", "--server", "http://relay.test", "--name", "Bob"]), 1)
         self.assertEqual(self.alice.users(), [])
