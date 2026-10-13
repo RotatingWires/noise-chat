@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from noisechat import cli
 from noisechat.auth import PasswordVerifier, RelayAccess, ServerAccessError, SESSION_SECONDS
-from noisechat.client import Client, Presence, Receiver, terminal_text
+from noisechat.client import Client, Presence, Receiver, _desktop_notification, notify_new_message, terminal_text
 from noisechat.crypto import (ChannelDeletedError, NoiseChatError, b64decode, b64encode, decrypt_key_file,
                               decrypt_message, encrypt_event, encrypt_key_file, encrypt_message, generate_key, room_id)
 from noisechat.keys import KeyStore, native_backend, read_key_file, write_key_file
@@ -181,6 +181,35 @@ class KeyTests(unittest.TestCase):
                 self.assertEqual(cli.main(["encrypt", "alice", "--name", "Alice"]), 0)
             ciphertext = output.getvalue().strip()
             self.assertEqual(decrypt_message(KeyStore().get("bob"), ciphertext)["text"], "hello from Alice")
+
+
+class NotificationTests(unittest.TestCase):
+    def test_linux_notification_uses_notify_send(self):
+        with patch("noisechat.client.sys.platform", "linux"), \
+                patch("noisechat.client.shutil.which", side_effect=lambda name: "/usr/bin/notify-send" if name == "notify-send" else None), \
+                patch("noisechat.client.subprocess.Popen") as launch:
+            _desktop_notification()
+        command = launch.call_args.args[0]
+        self.assertEqual(command[:4], ["/usr/bin/notify-send", "--app-name=NoiseChat", "--urgency=normal", "--expire-time=5000"])
+        self.assertEqual(command[-2:], ["NoiseChat", "New message received."])
+
+    def test_windows_notification_uses_powershell_toast(self):
+        with patch("noisechat.client.sys.platform", "win32"), \
+                patch("noisechat.client.shutil.which", side_effect=lambda name: "powershell.exe" if name == "powershell.exe" else None), \
+                patch("noisechat.client.subprocess.Popen") as launch:
+            _desktop_notification()
+        command = launch.call_args.args[0]
+        self.assertEqual(command[:3], ["powershell.exe", "-NoLogo", "-NoProfile"])
+        self.assertIn("ToastNotificationManager", __import__("base64").b64decode(command[-1]).decode("utf-16le"))
+
+    def test_windows_attention_runs_flash_and_popup(self):
+        with patch("noisechat.client.sys.platform", "win32"), \
+                patch("noisechat.client._flash_windows_taskbar") as flash, \
+                patch("noisechat.client._desktop_notification") as popup, \
+                patch("builtins.print"):
+            notify_new_message()
+        flash.assert_called_once_with()
+        popup.assert_called_once_with()
 
 
 class WireSocket:

@@ -1,8 +1,11 @@
 """Client transport and terminal-safe rendering."""
 
+import base64
 import json
 import secrets
+import shutil
 import sys
+import subprocess
 import threading
 import unicodedata
 from collections import OrderedDict
@@ -218,23 +221,84 @@ def render_message(message: dict) -> str:
     return f"[{timestamp}] {terminal_text(message['sender'])}: {terminal_text(message['text'])}"
 
 
+def _spawn_background(command: list[str], windows: bool = False) -> None:
+    options = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if windows:
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    else:
+        options["start_new_session"] = True
+    try:
+        process = subprocess.Popen(command, **options)
+        threading.Thread(target=process.wait, daemon=True).start()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
+def _flash_windows_taskbar() -> None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FlashWindowInfo(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND),
+                        ("dwFlags", wintypes.DWORD), ("uCount", wintypes.UINT),
+                        ("dwTimeout", wintypes.DWORD)]
+
+        window = ctypes.windll.kernel32.GetConsoleWindow()
+        if window:
+            # FLASHW_ALL | FLASHW_TIMERNOFG: flash the caption and taskbar
+            # even when the console is not the foreground window.
+            info = FlashWindowInfo(ctypes.sizeof(FlashWindowInfo), window, 3 | 12, 3, 0)
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+    except (AttributeError, OSError, TypeError):
+        pass
+
+
+_WINDOWS_TOAST_SCRIPT = """
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml('<toast><visual><binding template="ToastGeneric"><text>NoiseChat</text><text>New message received.</text></binding></visual></toast>')
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
+""".strip()
+
+
+def _desktop_notification() -> None:
+    """Best-effort popup using the platform's already-installed notification service."""
+    if sys.platform == "win32":
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+        if powershell:
+            encoded = base64.b64encode(_WINDOWS_TOAST_SCRIPT.encode("utf-16le")).decode("ascii")
+            _spawn_background([powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+                               "-EncodedCommand", encoded], windows=True)
+        return
+    if sys.platform == "darwin":
+        osascript = shutil.which("osascript")
+        if osascript:
+            _spawn_background([osascript, "-e", "display notification \"New message received.\" with title \"NoiseChat\""])
+        return
+    notify_send = shutil.which("notify-send")
+    if notify_send:
+        _spawn_background([notify_send, "--app-name=NoiseChat", "--urgency=normal", "--expire-time=5000",
+                           "NoiseChat", "New message received."])
+        return
+    # KDE installations may have kdialog without libnotify's notify-send.
+    kdialog = shutil.which("kdialog")
+    if kdialog:
+        _spawn_background([kdialog, "--title", "NoiseChat", "--passivepopup", "New message received.", "5"])
+
+
 def notify_new_message() -> None:
-    """Use the terminal bell and, on Windows, request a taskbar flash."""
+    """Ring the terminal and request desktop attention for a received message."""
     try:
         print("\a", end="", flush=True)
     except OSError:
         pass
     if sys.platform == "win32":
-        try:
-            import ctypes
-            class FlashWindowInfo(ctypes.Structure):
-                _fields_ = [("window", ctypes.c_void_p), ("flags", ctypes.c_uint),
-                            ("count", ctypes.c_uint), ("timeout", ctypes.c_uint)]
-            window = ctypes.windll.kernel32.GetConsoleWindow()
-            if window:
-                ctypes.windll.user32.FlashWindowEx(ctypes.byref(FlashWindowInfo(window, 14, 3, 0)))
-        except (AttributeError, OSError, TypeError):
-            pass
+        _flash_windows_taskbar()
+    _desktop_notification()
 
 
 class Receiver:

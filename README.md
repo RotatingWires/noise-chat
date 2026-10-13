@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.6
+# NoiseChat v0.4.7
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -131,7 +131,9 @@ noisechat join friends --server "http://127.0.0.1:8713" --name Alice
 noisechat join friends --server "http://127.0.0.1:8713" --name Bob
 ```
 
-Type a message and press Enter. Everyone in the channel receives encrypted `[Wall] Alice joined the chat.` and `[Wall] Alice left the chat.` announcements as participants connect and disconnect. When you join, NoiseChat privately prints `Use /users to list users in this channel, and /quit to quit.` `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and announcements appear when you connect. Incoming messages appear above your current draft while you type and trigger the terminal bell; your own relay echo stays silent. On Windows, NoiseChat also requests a taskbar flash for received messages when the console supports it. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
+Type a message and press Enter. Everyone in the channel receives encrypted `[Wall] Alice joined the chat.` and `[Wall] Alice left the chat.` announcements as participants connect and disconnect. When you join, NoiseChat privately prints `Use /users to list users in this channel, and /quit to quit.` `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and announcements appear when you connect. Incoming messages appear above your current draft while you type and trigger the terminal bell plus a desktop notification when the platform service is available; your own relay echo stays silent. On Windows, NoiseChat also retries taskbar flashing and requests a Windows toast notification. On Fedora/KDE, it uses `notify-send` or falls back to `kdialog`; on macOS, it uses `osascript`. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
+
+Desktop notifications are optional. On Fedora, install `libnotify` for `notify-send`; KDE can use `kdialog` as a fallback. If neither command is installed, the terminal bell still works.
 
 ## Command reference
 
@@ -208,7 +210,7 @@ Usernames and join/leave announcements remain encrypted. You need each channel's
 
 Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately and publishes a leave announcement; after a crash or lost connection it expires within 60 seconds of the last accepted refresh without publishing a leave event. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join/leave notices are retained like chat messages, so use `users` for current online status.
 
-Upgrade both the relay and clients to v0.4.6 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
+Upgrade both the relay and clients to v0.4.7 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
 
 ## Give a friend access
 
@@ -353,7 +355,7 @@ Only enable this mode for a listener used by your trusted local connector. Loopb
 
 #### Set it up
 
-1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.6 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
+1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.7 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
 2. Start NoiseChat on the machine that will run `cloudflared`:
 
    ```sh
@@ -457,6 +459,11 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.7
+
+- Add best-effort desktop notifications for Windows, Fedora/KDE, and macOS.
+- Correct the Windows `FLASHWINFO` structure and use taskbar/caption flashing when the terminal supports it.
 
 ## v0.4.6
 
