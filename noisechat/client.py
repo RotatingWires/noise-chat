@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import secrets
 import shutil
 import sys
@@ -234,6 +235,19 @@ def _spawn_background(command: list[str], windows: bool = False) -> None:
         pass
 
 
+def _windows_taskbar_window(ctypes):
+    kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
+    # Windows Terminal hosts CLI programs in a pseudoconsole. Its
+    # GetConsoleWindow result is not the visible taskbar window, so first
+    # resolve the visible top-level window by the current console title.
+    title = ctypes.create_unicode_buffer(512)
+    if kernel32.GetConsoleTitleW(title, len(title)):
+        window = user32.FindWindowW(None, title.value)
+        if window and user32.IsWindowVisible(window):
+            return window
+    return kernel32.GetConsoleWindow()
+
+
 def _flash_windows_taskbar() -> None:
     try:
         import ctypes
@@ -244,13 +258,13 @@ def _flash_windows_taskbar() -> None:
                         ("dwFlags", wintypes.DWORD), ("uCount", wintypes.UINT),
                         ("dwTimeout", wintypes.DWORD)]
 
-        window = ctypes.windll.kernel32.GetConsoleWindow()
+        window = _windows_taskbar_window(ctypes)
         if window:
             # FLASHW_ALL | FLASHW_TIMERNOFG: flash the caption and taskbar
             # even when the console is not the foreground window.
             info = FlashWindowInfo(ctypes.sizeof(FlashWindowInfo), window, 3 | 12, 3, 0)
             ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
-    except (AttributeError, OSError, TypeError):
+    except (AttributeError, OSError, TypeError, ValueError):
         pass
 
 
@@ -279,23 +293,26 @@ def _desktop_notification() -> None:
         if osascript:
             _spawn_background([osascript, "-e", "display notification \"New message received.\" with title \"NoiseChat\""])
         return
-    notify_send = shutil.which("notify-send")
-    if notify_send:
-        _spawn_background([notify_send, "--app-name=NoiseChat", "--urgency=normal", "--expire-time=5000",
-                           "NoiseChat", "New message received."])
+    hyprctl = shutil.which("hyprctl")
+    if hyprctl and (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or
+                    "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
+        _spawn_background([hyprctl, "notify", "-1", "5000", "rgb(80aaff)",
+                           "NoiseChat: New message received."])
         return
+    for command_name in ("notify-send", "dunstify"):
+        command = shutil.which(command_name)
+        if command:
+            _spawn_background([command, "--app-name=NoiseChat", "--urgency=normal", "--expire-time=5000",
+                               "NoiseChat", "New message received."])
+            return
     # KDE installations may have kdialog without libnotify's notify-send.
     kdialog = shutil.which("kdialog")
     if kdialog:
         _spawn_background([kdialog, "--title", "NoiseChat", "--passivepopup", "New message received.", "5"])
 
 
-def notify_new_message() -> None:
-    """Ring the terminal and request desktop attention for a received message."""
-    try:
-        print("\a", end="", flush=True)
-    except OSError:
-        pass
+def notify_message_attention() -> None:
+    """Request desktop attention for a received message."""
     if sys.platform == "win32":
         _flash_windows_taskbar()
     _desktop_notification()
@@ -304,7 +321,7 @@ def notify_new_message() -> None:
 class Receiver:
     def __init__(self, client: Client, output=print, notify=None):
         self.client, self.output = client, output
-        self.notify = notify or (notify_new_message if output is print else lambda: None)
+        self.notify = notify or (notify_message_attention if output is print else lambda: None)
         self.cursor = 0
         self.seen = OrderedDict()
 
