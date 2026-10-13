@@ -17,7 +17,8 @@ from urllib.parse import urlsplit
 
 from noisechat import cli
 from noisechat.auth import PasswordVerifier, RelayAccess, ServerAccessError, SESSION_SECONDS
-from noisechat.client import Client, Presence, Receiver, _desktop_notification, notify_message_attention, terminal_text
+from noisechat.client import (Client, Presence, Receiver, _desktop_notification, _linux_window_is_focused,
+                              _windows_window_is_focused, notify_message_attention, terminal_text)
 from noisechat.crypto import (ChannelDeletedError, NoiseChatError, b64decode, b64encode, decrypt_key_file,
                               decrypt_message, encrypt_event, encrypt_key_file, encrypt_message, generate_key, room_id)
 from noisechat.keys import KeyStore, native_backend, read_key_file, write_key_file
@@ -201,6 +202,46 @@ class NotificationTests(unittest.TestCase):
             _desktop_notification()
         self.assertEqual(launch.call_args.args[0], ["/usr/bin/hyprctl", "notify", "-1", "5000", "rgb(80aaff)",
                                                      "NoiseChat: New message received."])
+
+    def test_hyprland_prefers_desktop_notification_sender(self):
+        with patch.dict("noisechat.client.os.environ", {"HYPRLAND_INSTANCE_SIGNATURE": "instance"}, clear=True), \
+                patch("noisechat.client.sys.platform", "linux"), \
+                patch("noisechat.client.shutil.which", side_effect=lambda name: {
+                    "hyprctl": "/usr/bin/hyprctl", "notify-send": "/usr/bin/notify-send"}.get(name)), \
+                patch("noisechat.client._spawn_background") as launch:
+            _desktop_notification()
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(launch.call_args.args[0][0], "/usr/bin/notify-send")
+
+    def test_failed_hyprland_focus_query_remains_unknown(self):
+        from subprocess import CompletedProcess
+        for status, response in ((1, ""), (0, "{}"), (0, "[]"), (0, '{"pid": 0}')):
+            with self.subTest(status=status, response=response), \
+                    patch.dict("noisechat.client.os.environ", {"HYPRLAND_INSTANCE_SIGNATURE": "instance"}, clear=True), \
+                    patch("noisechat.client.shutil.which", return_value="/usr/bin/hyprctl"), \
+                    patch("noisechat.client._ancestor_pids", return_value={42}), \
+                    patch("noisechat.client.subprocess.run", return_value=CompletedProcess([], status, response)):
+                self.assertIsNone(_linux_window_is_focused())
+
+    def test_windows_focus_handle_survives_title_change(self):
+        import ctypes
+        from unittest.mock import Mock
+        handle = 0x123456789
+        kernel32, user32 = Mock(), Mock()
+        def title(buffer, size):
+            buffer.value = "NoiseChat"
+            return len(buffer.value)
+        kernel32.GetConsoleTitleW.side_effect = title
+        user32.FindWindowW.return_value = handle
+        user32.IsWindowVisible.return_value = True
+        user32.GetForegroundWindow.return_value = 0x987654321
+        with patch.object(ctypes, "windll", SimpleNamespace(kernel32=kernel32, user32=user32), create=True), \
+                patch("noisechat.client._windows_terminal_window", None):
+            self.assertFalse(_windows_window_is_focused())
+            kernel32.GetConsoleTitleW.side_effect = AssertionError("The title has changed")
+            user32.GetForegroundWindow.return_value = handle
+            self.assertTrue(_windows_window_is_focused())
+        user32.FindWindowW.assert_called_once_with(None, "NoiseChat")
 
     def test_windows_notification_uses_powershell_toast(self):
         with patch("noisechat.client.sys.platform", "win32"), \

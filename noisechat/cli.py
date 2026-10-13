@@ -13,10 +13,10 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .auth import PasswordVerifier, password_bytes
-from .client import Client, Presence, Receiver, notify_message_attention, terminal_text
+from .client import Client, Presence, Receiver, _window_is_focused, notify_message_attention, terminal_text
 from .crypto import NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
-from .terminal import chat_input
+from .terminal import TerminalAttention, chat_input
 
 DEFAULT_RELAY_URL = "http://127.0.0.1:8713"
 
@@ -166,8 +166,9 @@ def join_command(args) -> None:
         with lock:
             print(text, flush=True)
 
-    with chat_input() as read_message:
-        receiver = Receiver(client, output, notify_message_attention)
+    attention = TerminalAttention(_window_is_focused, notify_message_attention)
+    with chat_input(attention) as read_message:
+        receiver = Receiver(client, output, attention.message_received)
         stop = threading.Event()
         presence = Presence(client, args.name, output, stop)
         thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)
