@@ -1,5 +1,6 @@
 """Interactive input that clears submitted text and preserves incoming output."""
 
+import os
 import sys
 import threading
 from contextlib import contextmanager
@@ -13,6 +14,11 @@ def _write_title(output, title):
         if isinstance(output, Win32Output):
             output.set_title(title)
             return
+    if sys.platform != "win32" and (os.environ.get("KONSOLE_VERSION") or os.environ.get("KONSOLE_DBUS_SESSION")):
+        # Konsole's default %d : %n tab format ignores OSC 2. OSC 30
+        # switches this session to the shell-controlled title (%w), without
+        # modifying the saved profile; the shell can reclaim it after exit.
+        output.write_raw("\x1b]30;%w\x1b\\")
     output.write_raw(f"\x1b]2;{title}\x1b\\")
     output.flush()  # Windows10_Output enables VT processing during flush.
 

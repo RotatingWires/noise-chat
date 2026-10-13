@@ -434,7 +434,7 @@ class Receiver:
         self.cursor = 0
         self.seen = OrderedDict()
 
-    def receive(self, wait: int = 20) -> int:
+    def receive(self, wait: int = 20, notify: bool = True) -> int:
         count = 0
         for record in self.client.poll(self.cursor, wait):
             # Bad packets must not block later valid messages in the same batch.
@@ -453,19 +453,26 @@ class Receiver:
                 self.seen.popitem(last=False)
             local_message = message["id"] in getattr(self.client, "sent_message_ids", ())
             self.output(render_message(message))
-            if message["kind"] == "text" and not local_message:
+            if notify and message["kind"] == "text" and not local_message:
                 self.notify()
             count += 1
         return count
 
-    def listen(self, stop: threading.Event) -> None:
+    def listen(self, stop: threading.Event, on_history_loaded=None) -> None:
         offline = False
+        loading_history = on_history_loaded is not None
         while not stop.is_set():
             try:
-                self.receive()
+                previous_cursor = self.cursor
+                self.receive(wait=0 if loading_history else 20, notify=not loading_history)
                 if offline:
                     self.output("[Reconnected to relay.]")
                 offline = False
+                # Cursor advancement counts all packets, including rejected or
+                # duplicate packets, so they cannot truncate initial history.
+                if loading_history and self.cursor == previous_cursor and not stop.is_set():
+                    on_history_loaded()
+                    loading_history = False
             except (ChannelDeletedError, ServerAccessError) as error:
                 if not stop.is_set():
                     stop.set()

@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.12
+# NoiseChat v0.4.13
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -131,7 +131,7 @@ noisechat join friends --server "http://127.0.0.1:8713" --name Alice
 noisechat join friends --server "http://127.0.0.1:8713" --name Bob
 ```
 
-Type a message and press Enter. Everyone in the channel receives encrypted `[Wall] Alice joined the chat.` and `[Wall] Alice left the chat.` announcements as participants connect and disconnect. When you join, NoiseChat privately prints `Use /users to list users in this channel, and /quit to quit.` `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and announcements appear when you connect. Incoming messages appear above your current draft while you type; your own relay echo stays silent. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
+Type a message and press Enter. Everyone in the channel receives encrypted `[Wall] Alice joined the chat.` and `[Wall] Alice left the chat.` announcements as participants connect and disconnect. When you join, NoiseChat privately prints `Use /users to list users in this channel, and /quit to quit.` `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and announcements appear when you connect, followed by the “Chatting as” message and the `/users` and `/quit` instructions. Incoming messages appear above your current draft while you type; your own relay echo stays silent. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
 
 ### Notifications
 
@@ -139,7 +139,7 @@ Incoming messages trigger desktop notifications only when the terminal window is
 
 Windows uses toast notifications and requests taskbar attention. KDE uses `notify-send`, `dunstify`, or `kdialog`; Fedora KDE Wayland also needs `kdotool` for focus detection (`sudo dnf install kdotool`). Hyprland/Arch uses `hyprctl` for focus detection and prefers `notify-send` or `dunstify` for desktop notifications, with native `hyprctl notify` as the fallback when neither sender is installed. On Arch, `libnotify` provides `notify-send`; run a notification daemon such as `mako`, `dunst`, or `swaync`. KDE already provides a notification service. X11 focus detection uses `xdotool`. macOS uses `osascript`.
 
-Terminal settings can override application titles. In [Windows Terminal](https://learn.microsoft.com/en-us/windows/terminal/customize-settings/profile-advanced#suppress-title-changes), allow application title changes (`suppressApplicationTitle: false`). In [Konsole](https://docs.kde.org/stable_kf6/en/konsole/konsole/console-dialogs.html), include `%w` in the tab title format to display NoiseChat's title.
+Terminal settings can override application titles. In [Windows Terminal](https://learn.microsoft.com/en-us/windows/terminal/customize-settings/profile-advanced#suppress-title-changes), allow application title changes (`suppressApplicationTitle: false`). In Konsole, NoiseChat automatically switches the current session to the application-controlled tab title using its native session-title command; this does not edit your saved profile. The shell can update the title again after you quit.
 
 ## Command reference
 
@@ -216,7 +216,7 @@ Usernames and join/leave announcements remain encrypted. You need each channel's
 
 Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately and publishes a leave announcement; after a crash or lost connection it expires within 60 seconds of the last accepted refresh without publishing a leave event. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join/leave notices are retained like chat messages, so use `users` for current online status.
 
-Upgrade both the relay and clients to v0.4.12 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
+Upgrade both the relay and clients to v0.4.13 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
 
 ## Give a friend access
 
@@ -361,7 +361,7 @@ Only enable this mode for a listener used by your trusted local connector. Loopb
 
 #### Set it up
 
-1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.12 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
+1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.13 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
 2. Start NoiseChat on the machine that will run `cloudflared`:
 
    ```sh
@@ -424,7 +424,7 @@ The history limits are defined by `RelayStore` defaults in `noisechat/relay.py`;
 
 ### How history appears when you connect
 
-`noisechat join` automatically displays retained history when you connect. A new client session starts its in-memory cursor at `0`, requests the room's retained packets from the relay, decrypts them locally, and prints them in relay sequence order, oldest first. History includes retained join announcements and your own earlier messages. Responses contain at most 100 packets, and `join` keeps reading further batches before long-polling for new messages. There is no separate restore command.
+`noisechat join` automatically displays retained history when you connect. A new client session starts its in-memory cursor at `0`, requests the room's retained packets from the relay, decrypts them locally, and prints them in relay sequence order, oldest first. History includes retained join announcements and your own earlier messages. Responses contain at most 100 packets, and `join` keeps reading further batches before long-polling for new messages. The “Chatting as” message and command instructions print after the initial history has finished loading. Retained history does not trigger desktop notifications or unread titles; new messages received afterward do. There is no separate restore command.
 
 During a temporary connection loss, a still-running client keeps its cursor and resumes after the last packet it received. Closing and reopening the client starts a new session and displays all still-retained history again; no cursor is persisted to disk. Packets already evicted by retention or removed by channel deletion cannot be restored from the relay.
 
@@ -465,6 +465,12 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.13
+
+- Update Konsole tab titles even when the profile normally shows the directory and program name.
+- Print joining instructions after all initial history batches have loaded.
+- Keep history loading quiet and preserve notification behavior for live messages.
 
 ## v0.4.12
 

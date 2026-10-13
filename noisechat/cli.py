@@ -166,16 +166,18 @@ def join_command(args) -> None:
         with lock:
             print(text, flush=True)
 
+    def history_loaded():
+        output(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter.\n"
+               "Use /users to list users in this channel, and /quit to quit.\n"
+               "Names are chosen by key holders, not verified identities.")
+
     attention = TerminalAttention(_window_is_focused, notify_message_attention)
     with chat_input(attention) as read_message:
         receiver = Receiver(client, output, attention.message_received)
         stop = threading.Event()
         presence = Presence(client, args.name, output, stop)
-        thread = threading.Thread(target=receiver.listen, args=(stop,), daemon=True)
+        thread = threading.Thread(target=receiver.listen, args=(stop, history_loaded), daemon=True)
         presence.start()
-        print(f"Chatting as {terminal_text(args.name)}. Type a message and press Enter.")
-        print("Use /users to list users in this channel, and /quit to quit.")
-        print("Names are chosen by key holders, not verified identities.")
         thread.start()
         try:
             while not stop.is_set():

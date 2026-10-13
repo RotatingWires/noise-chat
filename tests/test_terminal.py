@@ -24,6 +24,8 @@ class ScreenOutput(DummyOutput):
         self.autowrap = True
         self.changed = threading.Condition()
         self.title_controls = []
+        self.tab_format = "%d : %n"
+        self.window_title = ""
 
     def get_size(self):
         return Size(rows=40, columns=38)
@@ -46,8 +48,12 @@ class ScreenOutput(DummyOutput):
                 self.column += width
 
     def write_raw(self, text):
-        if text.startswith("\x1b]2;") and text.endswith("\x1b\\"):
+        if text.startswith(("\x1b]2;", "\x1b]30;")) and text.endswith("\x1b\\"):
             self.title_controls.append(text)
+            if text.startswith("\x1b]30;"):
+                self.tab_format = text[5:-2]
+            else:
+                self.window_title = text[4:-2]
         else:
             self.write(text)
 
@@ -180,6 +186,16 @@ class TerminalTests(unittest.TestCase):
         self.assertFalse(attention.thread.is_alive())
         attention.message_received()  # A late long-poll response after exit stays quiet.
         notify.assert_called_once_with()
+
+    def test_konsole_title_overrides_directory_and_program_tab_format(self):
+        screen = ScreenOutput()
+        with patch.dict(os.environ, {"KONSOLE_VERSION": "260800"}), \
+                patch("noisechat.terminal.sys.platform", "linux"):
+            for title in ("NoiseChat", "New Message - NoiseChat", "NoiseChat"):
+                _write_title(screen, title)
+                self.assertEqual(screen.tab_format.replace("%w", screen.window_title), title)
+        self.assertTrue(all("\x07" not in control for control in screen.title_controls))
+        self.assertEqual(screen.text(), "")
 
     def test_title_watcher_stops_when_input_is_interrupted(self):
         attention = TerminalAttention(lambda: False, Mock())
