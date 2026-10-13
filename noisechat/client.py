@@ -260,82 +260,6 @@ def _windows_window_is_focused() -> bool | None:
         return None
 
 
-_ATTENTION_TITLE = "New Message - NoiseChat"
-_DEFAULT_TERMINAL_TITLE = "NoiseChat"
-_attention_title_lock = threading.Lock()
-_attention_title_active = False
-_attention_title_stop = threading.Event()
-_attention_title_thread = None
-_windows_original_title = None
-
-
-def _set_terminal_title(title: str) -> None:
-    """Set the current terminal tab/window title without affecting chat input."""
-    global _windows_original_title
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            if _windows_original_title is None:
-                original = ctypes.create_unicode_buffer(512)
-                kernel32.GetConsoleTitleW(original, len(original))
-                _windows_original_title = original.value
-            kernel32.SetConsoleTitleW(title)
-        except (AttributeError, OSError, TypeError, ValueError):
-            pass
-        return
-    try:
-        sys.stdout.write(f"\033]0;{title}\a")
-        sys.stdout.flush()
-    except (AttributeError, OSError, UnicodeError):
-        pass
-
-
-def _restore_terminal_title() -> None:
-    global _windows_original_title
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            if _windows_original_title is not None:
-                ctypes.windll.kernel32.SetConsoleTitleW(_windows_original_title)
-        except (AttributeError, OSError, TypeError, ValueError):
-            pass
-        finally:
-            _windows_original_title = None
-        return
-    _set_terminal_title(_DEFAULT_TERMINAL_TITLE)
-
-
-def _watch_attention_title() -> None:
-    while not _attention_title_stop.wait(.25):
-        if _window_is_focused() is True:
-            clear_attention_title()
-            return
-
-
-def _show_attention_title() -> None:
-    global _attention_title_active, _attention_title_thread
-    with _attention_title_lock:
-        if _attention_title_active:
-            return
-        _set_terminal_title(_ATTENTION_TITLE)
-        _attention_title_active = True
-        _attention_title_stop.clear()
-        _attention_title_thread = threading.Thread(target=_watch_attention_title, daemon=True)
-        _attention_title_thread.start()
-
-
-def clear_attention_title() -> None:
-    global _attention_title_active, _attention_title_thread
-    with _attention_title_lock:
-        if not _attention_title_active:
-            return
-        _attention_title_active = False
-        _attention_title_stop.set()
-        _restore_terminal_title()
-        _attention_title_thread = None
-
-
 def _flash_windows_taskbar() -> None:
     try:
         import ctypes
@@ -384,15 +308,9 @@ def _desktop_notification() -> None:
     hyprctl = shutil.which("hyprctl")
     if hyprctl and (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or
                     "hyprland" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold()):
-        try:
-            result = subprocess.run([hyprctl, "notify", "-1", "5000", "rgb(80aaff)",
-                                     "NoiseChat: New message received."],
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, timeout=1, check=False)
-            if result.returncode == 0:
-                return
-        except (OSError, ValueError, subprocess.SubprocessError):
-            pass
+        _spawn_background([hyprctl, "notify", "-1", "5000", "rgb(80aaff)",
+                           "NoiseChat: New message received."])
+        return
     for command_name in ("notify-send", "dunstify"):
         command = shutil.which(command_name)
         if command:
@@ -485,7 +403,6 @@ def notify_message_attention() -> None:
     """Request desktop attention for a received message."""
     if _window_is_focused() is not False:
         return
-    _show_attention_title()
     if sys.platform == "win32":
         _flash_windows_taskbar()
     _desktop_notification()
