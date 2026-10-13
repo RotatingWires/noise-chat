@@ -630,13 +630,44 @@ class RelayTests(unittest.TestCase):
         output = io.StringIO()
         def wait_for_history(prompt):
             deadline = time.monotonic() + 2
-            while "history124" not in output.getvalue() and time.monotonic() < deadline:
+            while "Use /users to list users" not in output.getvalue() and time.monotonic() < deadline:
                 time.sleep(.005)
             return "/quit"
         with patch("noisechat.cli.load_key", return_value=self.key), patch("noisechat.cli.Client", return_value=self.bob), patch("builtins.input", side_effect=wait_for_history), contextlib.redirect_stdout(output):
             self.assertEqual(cli.main(["join", "friends", "--server", "http://relay.test", "--name", "Bob"]), 0)
         history = [line.split("Alice: ", 1)[1] for line in output.getvalue().splitlines() if "Alice: history" in line]
         self.assertEqual(history, [f"history{number:03}" for number in range(125)])
+        text = output.getvalue()
+        self.assertLess(text.index("history124"), text.index("Chatting as Bob"))
+        self.assertLess(text.index("Chatting as Bob"), text.index("Use /users to list users"))
+        self.assertEqual(text.count("Chatting as Bob"), 1)
+
+    def test_initial_history_ignores_bad_packets_before_banner_and_live_notifications(self):
+        stop = threading.Event()
+        output, notifications, waits = [], [], []
+        wrong_key = generate_key()
+        junk = encrypt_message(wrong_key, "Other", "junk")
+        batches = iter([
+            [{"sequence": n, "envelope": junk} for n in range(1, 101)],
+            [{"sequence": 101, "envelope": encrypt_message(self.key, "Alice", "retained message")}],
+            [],
+            [{"sequence": 102, "envelope": encrypt_message(self.key, "Alice", "live message")}],
+        ])
+        def poll(after, wait):
+            waits.append(wait)
+            return next(batches)
+        def show(text):
+            output.append(text)
+            if "live message" in text:
+                stop.set()
+        client = SimpleNamespace(key=self.key, poll=poll)
+        Receiver(client, show, lambda: notifications.append("notify")).listen(
+            stop, lambda: output.append("joining instructions"))
+        self.assertEqual(waits, [0, 0, 0, 20])
+        self.assertIn("retained message", output[-3])
+        self.assertEqual(output[-2], "joining instructions")
+        self.assertIn("live message", output[-1])
+        self.assertEqual(notifications, ["notify"])
 
     def test_cli_send_listen_and_live_join_use_the_same_encrypted_transport(self):
         output=io.StringIO()
