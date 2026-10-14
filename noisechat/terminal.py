@@ -6,6 +6,68 @@ import threading
 from contextlib import contextmanager
 
 
+def _normal_backspace():
+    if sys.platform == "win32":
+        return "\x08"
+    try:
+        import curses
+    except ImportError:
+        return "\x7f"
+    try:
+        curses.setupterm()
+        key = curses.tigetstr("kbs")
+        if key in (b"\x08", b"\x7f"):
+            return key.decode("ascii")
+    except (curses.error, OSError):
+        pass
+    return "\x7f"
+
+
+def _editing_bindings():
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
+
+    bindings = KeyBindings()
+    normal_backspace = _normal_backspace()
+    delete_word = get_by_name("backward-kill-word")
+    delete_character = get_by_name("backward-delete-char")
+
+    @bindings.add("c-left")
+    def previous_word(event):
+        buffer = event.current_buffer
+        offset = buffer.document.find_previous_word_beginning()
+        buffer.cursor_position = buffer.cursor_position + offset if offset is not None else 0
+
+    @bindings.add("c-right")
+    def next_word(event):
+        buffer = event.current_buffer
+        offset = buffer.document.find_next_word_beginning()
+        buffer.cursor_position = buffer.cursor_position + offset if offset is not None else len(buffer.text)
+
+    bindings.add("c-up")(get_by_name("beginning-of-buffer"))
+    bindings.add("c-down")(get_by_name("end-of-buffer"))
+    bindings.add("c-delete")(get_by_name("kill-word"))
+    bindings.add("c-w")(delete_word)
+
+    @bindings.add("c-h")
+    def backspace(event):
+        # prompt_toolkit names both BS and DEL as Backspace. Preserve the raw
+        # byte: Konsole/xterm use DEL for Backspace and BS for Ctrl+Backspace;
+        # Windows console input uses the opposite pair.
+        raw = event.key_sequence[-1].data
+        if raw in ("\x08", "\x7f") and raw != normal_backspace:
+            delete_word.handler(event)
+        else:
+            delete_character.handler(event)
+
+    # CSI-u and xterm modifyOtherKeys report Ctrl+Backspace explicitly.
+    # Register key sequences through the normal binding API, leaving the
+    # library's shared escape parser and bracketed-paste handling intact.
+    for sequence in ("[127;5u", "[8;5u", "[27;5;127~", "[27;5;8~"):
+        bindings.add("escape", *sequence)(delete_word)
+    return bindings
+
+
 def _write_title(output, title):
     # Use the renderer's output, never patch_stdout's escaped text stream.
     # ST ends the OSC command without emitting a BEL character.
@@ -93,7 +155,7 @@ def chat_input(attention=None):
     from prompt_toolkit.history import DummyHistory
     from prompt_toolkit.patch_stdout import patch_stdout
 
-    session = PromptSession(erase_when_done=True, history=DummyHistory())
+    session = PromptSession(erase_when_done=True, history=DummyHistory(), key_bindings=_editing_bindings())
     # Incoming receiver/presence output prints above the current draft. Closing
     # this context flushes pending output and restores the original streams.
     if attention is not None:

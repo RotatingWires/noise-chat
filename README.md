@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.16
+# NoiseChat v0.4.17
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -170,6 +170,21 @@ noisechat join friends --server "http://127.0.0.1:8713" --name Bob
 
 Type a message and press Enter. Everyone in the channel receives encrypted `[Wall] Alice joined the chat.` and `[Wall] Alice left the chat.` announcements as participants connect and disconnect. When you join, NoiseChat privately prints `Use /users to list users in this channel, and /quit to quit.` `/users` lists connected users in your current channel; `/quit` or Ctrl+C exits. Existing retained messages and announcements appear when you connect, followed by the “Chatting as” message and the `/users` and `/quit` instructions. Incoming messages appear above your current draft while you type; your own relay echo stays silent. After you press Enter, the typed line disappears; your message appears once in the relay's formatted output. Chat input history is not saved.
 
+### Editing a message
+
+The interactive `noisechat join` draft supports editor-style word movement and deletion:
+
+| Keys | Action |
+| --- | --- |
+| Ctrl+Left / Ctrl+Right | Move to the previous / next word's start, or the draft boundary. |
+| Ctrl+Up / Ctrl+Down | Move to the start / end of the draft. |
+| Ctrl+Backspace | Delete the word before the cursor. |
+| Ctrl+Delete | Delete the word after the cursor. |
+| Ctrl+W | Delete the previous word; an alternative when a terminal intercepts Ctrl+Backspace. |
+| Backspace / Delete | Delete one character before / after the cursor. |
+
+Unicode text can be edited, and incoming messages leave the draft in place. Normal Backspace is kept separate from the common Ctrl+Backspace encodings: the client uses terminfo on Unix and the native console convention on Windows. Explicit CSI-u/xterm Ctrl+Backspace sequences are also recognized. Terminal shortcuts assigned by your terminal app still need to be passed through to NoiseChat. Redirected input uses the existing plain input behavior.
+
 ### Notifications
 
 Incoming messages trigger desktop notifications only when the terminal window is out of focus. In interactive `join`, the title also changes from `NoiseChat` to `New Message - NoiseChat` and returns to `NoiseChat` when the terminal regains focus. NoiseChat emits no terminal bell. Focus is checked at the terminal window level: if a window has multiple tabs and another tab is selected, the window is still focused, so NoiseChat does not send a notification or mark its title unread. If focus cannot be determined, NoiseChat stays quiet.
@@ -253,7 +268,7 @@ Usernames and join/leave announcements remain encrypted. You need each channel's
 
 Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately and publishes a leave announcement; after a crash or lost connection it expires within 60 seconds of the last accepted refresh without publishing a leave event. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join/leave notices are retained like chat messages, so use `users` for current online status.
 
-Upgrade both the relay and clients to v0.4.16 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
+Upgrade both the relay and clients to v0.4.17 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
 
 ## Give a friend access
 
@@ -398,7 +413,7 @@ Only enable this mode for a listener used by your trusted local connector. Loopb
 
 #### Set it up
 
-1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.16 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
+1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.17 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
 2. Start NoiseChat on the machine that will run `cloudflared`:
 
    ```sh
@@ -502,6 +517,13 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats and shared protocol/file limits, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.17
+
+- Add explicit word/draft navigation and word deletion to the interactive prompt.
+- Distinguish regular Backspace from Ctrl+Backspace using terminal/native input conventions and support explicit modified-key sequences.
+- Preserve Unicode drafts, bracketed paste, incoming output, notification/title behavior, and plain redirected input.
+- Add editing regression tests and document the shortcuts.
 
 ## v0.4.16
 
