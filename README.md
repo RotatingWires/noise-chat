@@ -69,6 +69,43 @@ noisechat listen friends --server "https://your-relay.example.com" --password-fi
 
 The password file contains **plaintext credentials**, unlike the server's hash file or encrypted USB key export. Restrict it to the service/client account: `chmod 600 server.noise-password` on Unix, or the equivalent Windows file permissions. Unix clients reject files readable or writable by other users. Files contain one line, with an optional final newline; passwords are limited to 1024 UTF-8 bytes. Passwords are never CLI arguments or environment variables. The client does not save a prompted server password to disk or the keyring, but retains it in process memory to renew its session. The relay keeps at most 1,000 live login sessions, expiring old sessions after 12 hours; multi-channel `users` shares one login.
 
+## HTTP API
+
+The default relay base URL is `http://localhost:8713`; use your relay's HTTPS hostname when connecting through a tunnel. Responses are JSON with `Cache-Control: no-store`. POST bodies must be UTF-8 JSON with `Content-Type: application/json` and one valid `Content-Length`; chunked request bodies are not supported. Bodies are limited to 16,384 bytes.
+
+`/health` and `/v1/auth/login` do not require a session. Every room request needs exactly one `Authorization: Bearer TOKEN` header. A successful password login returns a 64-character lowercase hexadecimal token, valid for 12 hours in this running relay. Restarting the relay invalidates it. Tokens stay in client memory for that process; starting a new CLI command logs in again. Login/password handling is separate from the shared chat key used to encrypt/decrypt packets.
+
+`ROOM_ID` below is the 64-character lowercase hexadecimal room ID derived from the chat key, not the local chat name. A room ID is routing information, not authorization. A valid server token can access any known room ID; there are no per-room accounts or permissions. Reading/decrypting or producing authentic chat contents still requires the room's shared key. The relay only validates envelope structure/size, so it cannot reject all junk submitted by a server-authorized caller.
+
+| Method | Path | Request | Response / effect |
+| --- | --- | --- | --- |
+| GET | `/health` | Public; no body or query. | 200 `{ok: true, version, protocol: 1}`. Does not validate login or Cloudflare visitor headers. |
+| POST | `/v1/auth/login` | Public JSON: `{password: "..."}`. | 200 `{token: "..."}`; 401 for an incorrect password. Five attempts per observed visitor IP per 60 seconds; excess returns 429 with `Retry-After` and JSON `retry_after`. |
+| GET | `/v1/rooms/ROOM_ID/messages` | Bearer token; optional `after` and `wait` query values. | 200 `{messages: [{sequence, envelope}, ...]}` in ascending sequence order. Returns up to 100 retained packets newer than `after`. Defaults: `after=0`, `wait=0`. `wait` is an integer from 0 to 20 seconds for long polling; `after` is a nonnegative decimal integer of at most 18 digits. |
+| POST | `/v1/rooms/ROOM_ID/messages` | Bearer token; JSON with exactly `{envelope: "..."}`. | Stores one encrypted packet, applies retention, wakes waiting readers; 201 `{sequence: N}`. The first accepted packet implicitly creates the room's retained history. |
+| GET | `/v1/rooms/ROOM_ID/presence` | Bearer token; no body/query. | 200 `{users: ["encrypted presence envelope", ...]}` for currently live sessions. Decrypted names and presence tokens are not included. |
+| POST | `/v1/rooms/ROOM_ID/presence` | Bearer token; JSON described below. | Joins/refreshes or leaves a presence session. Returns 200 `{joined: true/false}` or `{left: true}`. |
+
+### Presence requests
+
+To join or refresh, send exactly `{token, envelope, announcement}`. Here `token` is a client-generated 64-character lowercase hexadecimal **presence token**, separate from the server login token. `envelope` encrypts the user's presence/name, and `announcement` encrypts a join wall message. A new session stores the join announcement in normal room history and returns `joined: true`; refreshes update its expiry without storing another join announcement and return `joined: false`.
+
+Presence expires after 60 seconds without refresh; the CLI refreshes every 20 seconds. The relay allows up to 100 live sessions per room and 1,000 in total. Expiry removes presence without generating a leave wall message.
+
+To leave, send `{token}` or `{token, announcement}`, where the optional announcement encrypts a leave wall message. A live matching session is removed and its supplied announcement is retained in normal message history. Leaving an absent session is harmless and returns `left: true` without storing an announcement. The relay does not decrypt presence or announcement contents.
+
+### History, errors, and limits
+
+Start with `after=0` to retrieve retained history, then keep the highest returned `sequence` and poll after it. Sequences are allocated across the database, so gaps within one room are normal. More than 100 retained packets requires multiple calls. An empty array means no newer retained packets arrived during the requested wait. History retention applies to join/leave announcements as well as messages; it does not store plaintext.
+
+Encrypted envelopes are protocol-1, URL-safe Base64 packets produced by the client encryption code. The relay checks their header, encoding and size, with a maximum envelope length of 11,000 characters; a generic string or raw plaintext is not a valid message body. Offline `encrypt`/`decrypt` commands document client-side usage elsewhere in this README.
+
+Room POST requests, including presence refreshes/leaves, share a per-visitor-IP bucket with a burst capacity of 30 and refill of one request per second. Excess requests return 429. Login has its separate cooldown. Direct mode uses the socket peer IP; tunnel mode requires a loopback connector and one valid `CF-Connecting-IP` header for login and room requests, returning 403 if that requirement fails. See the Cloudflare Tunnel setup section for enabling this mode.
+
+Errors use `{error: "..."}`: 400 for invalid fields/query/envelopes or reached relay capacity, 401 for missing/invalid/expired login (room responses include `WWW-Authenticate: Bearer`), 403 for tunnel-header failures, 404 for unknown room-route paths, 410 when message polling/posting or presence lookup/join encounters a deleted room, 413 for oversized POST bodies, 429 for rate limits, and 503 for SQLite failures. Presence-only leave requests are idempotent even after deletion. The relay caps concurrent request workers at 64; extra connections can close without a JSON error.
+
+There is no HTTP channel-list, channel-delete, password-reset, or key-distribution endpoint. Channel deletion is restricted to the server console and erases retained messages plus live presence while permanently blocking that room ID. CLI `key list` lists local aliases and room IDs; server-console `channels` lists relay room IDs. Unknown room IDs can return empty history/presence without creating a stored room. Room POST query strings are rejected; presence GET allows no query parameters. Unknown room routes normally return 404 after authentication; other unsupported HTTP methods use the standard HTTP handler's error response.
+
 ## Install
 
 Requires Python 3.11 or newer. From this project folder:
@@ -465,6 +502,11 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats and shared protocol/file limits, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.15
+
+- Document every relay HTTP route, password/session authorization, encrypted payloads, presence lifecycle, polling/history, errors, and request limits.
+- Clarify room routing versus access, separate presence tokens from login tokens, and identify server-console-only operations.
 
 ## v0.4.14
 
