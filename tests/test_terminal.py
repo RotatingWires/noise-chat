@@ -162,6 +162,51 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(result, "hello")
         self.assertEqual(visible, "[16:57] Alice: earlier[16:58] Bob: hello")
 
+    def test_ctrl_arrows_move_between_word_starts(self):
+        result, _ = self.submit("one two three", ending="\x1b[1;5D\x1b[1;5D\x1b[1;5C>\r")
+        self.assertEqual(result, "one two >three")
+
+    def test_ctrl_up_and_down_move_to_draft_start_and_end(self):
+        result, _ = self.submit("draft", ending="\x1b[1;5Astart \x1b[1;5B end\r")
+        self.assertEqual(result, "start draft end")
+
+    def test_ctrl_backspace_deletes_word_but_plain_backspace_deletes_character(self):
+        with patch("noisechat.terminal._normal_backspace", return_value="\x7f"):
+            result, _ = self.submit("one two", ending="\x08\r")
+            self.assertEqual(result, "one ")
+            result, _ = self.submit("one two", ending="\x7f\r")
+            self.assertEqual(result, "one tw")
+
+    def test_windows_console_backspace_bytes_are_distinguished(self):
+        with patch("noisechat.terminal._normal_backspace", return_value="\x08"):
+            result, _ = self.submit("one two", ending="\x7f\r")
+            self.assertEqual(result, "one ")
+            result, _ = self.submit("one two", ending="\x08\r")
+            self.assertEqual(result, "one tw")
+
+    def test_explicit_ctrl_backspace_terminal_sequences(self):
+        for key in ("\x1b[127;5u", "\x1b[8;5u", "\x1b[27;5;127~", "\x1b[27;5;8~"):
+            with self.subTest(key=key):
+                result, _ = self.submit("one two", ending=key + "\r")
+                self.assertEqual(result, "one ")
+
+    def test_word_deletion_supports_unicode_and_incoming_output(self):
+        result, _ = self.submit("one café 世界", "[16:58] Alice: arriving", ending="\x17\r")
+        self.assertEqual(result, "one café ")
+
+    def test_ctrl_delete_erases_next_word_at_cursor(self):
+        result, _ = self.submit("one two three", ending="\x1b[1;5D\x1b[1;5D\x1b[3;5~\r")
+        self.assertEqual(result, "one  three")
+
+    def test_bracketed_paste_does_not_execute_embedded_editing_sequences(self):
+        pasted = "\x1b[127;5u"
+        result, _ = self.submit("draft", ending="\x1b[200~" + pasted + "\x1b[201~\r")
+        self.assertEqual(result, "draft" + pasted)
+
+    def test_word_navigation_stops_at_draft_boundaries(self):
+        result, _ = self.submit("one", ending="\x1b[1;5D\x1b[1;5D<\x1b[1;5C\x1b[1;5C>\r")
+        self.assertEqual(result, "<one>")
+
     def test_wrapped_unicode_draft_survives_incoming_output_and_is_erased(self):
         draft = "世界👋" * 24
         incoming = "[16:58] Alice: arriving"
