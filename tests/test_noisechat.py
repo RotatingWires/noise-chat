@@ -11,6 +11,7 @@ import unittest
 from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_type_hints
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -103,6 +104,12 @@ class MemoryKeyring:
 
 
 class KeyTests(unittest.TestCase):
+    def test_key_store_annotations_with_list_method(self):
+        # The KeyStore.list method must not shadow the built-in list in annotations.
+        self.assertTrue(callable(KeyStore.list))
+        self.assertEqual(get_type_hints(KeyStore._aliases)["return"], list[str])
+        self.assertEqual(get_type_hints(KeyStore._save_aliases)["aliases"], list[str])
+
     def test_passphrase_prompt_refuses_echoing_fallback(self):
         with patch("noisechat.cli.getpass.getpass",side_effect=cli.getpass.GetPassWarning("would echo")):
             with self.assertRaisesRegex(NoiseChatError,"hidden input"):
