@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.17
+# NoiseChat v0.4.18
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -68,6 +68,63 @@ noisechat listen friends --server "https://your-relay.example.com" --password-fi
 ```
 
 The password file contains **plaintext credentials**, unlike the server's hash file or encrypted USB key export. Restrict it to the service/client account: `chmod 600 server.noise-password` on Unix, or the equivalent Windows file permissions. Unix clients reject files readable or writable by other users. Files contain one line, with an optional final newline; passwords are limited to 1024 UTF-8 bytes. Passwords are never CLI arguments or environment variables. The client does not save a prompted server password to disk or the keyring, but retains it in process memory to renew its session. The relay keeps at most 1,000 live login sessions, expiring old sessions after 12 hours; multi-channel `users` shares one login.
+
+### Auto-join when you log into a Linux desktop
+
+Use desktop autostart to open a chat terminal after login. `cron @reboot` runs at boot, without an interactive terminal or an unlocked desktop keyring. Import the channel key first and check that a normal `noisechat join` works with your desktop wallet unlocked.
+
+For Fedora/KDE, you can keep the server password encrypted on disk using [systemd credentials](https://systemd.io/CREDENTIALS/) and the existing `--password-file` option. This example needs systemd 256 or newer (`systemd-creds --user`) and Konsole. The encrypted file is tied to this machine and user; recreate it after moving to another machine or changing the server password.
+
+1. Create the directories, then enter the server password at the hidden prompt. The pipe sends it directly to encryption, without making a plaintext password file:
+
+   ```sh
+   mkdir -p ~/.config/noisechat ~/.config/systemd/user ~/.config/autostart
+   systemd-ask-password -n 'NoiseChat server password:' | systemd-creds encrypt --user --name=server-password - ~/.config/noisechat/server-password.cred
+   chmod 600 ~/.config/noisechat/server-password.cred
+   ```
+
+2. Run `command -v noisechat` to find its full installed path. Create `~/.config/systemd/user/noisechat.service` with the following contents, replacing `/absolute/path/to/noisechat`, `friends`, the server URL, and `Alice` with your values:
+
+   ```ini
+   [Unit]
+   Description=NoiseChat desktop chat
+   After=graphical-session.target
+   PartOf=graphical-session.target
+
+   [Service]
+   Type=exec
+   LoadCredentialEncrypted=server-password:%h/.config/noisechat/server-password.cred
+   ExecStart=/usr/bin/konsole --nofork -e /absolute/path/to/noisechat join friends --server "https://your-relay.example.com" --name Alice --password-file ${CREDENTIALS_DIRECTORY}/server-password
+   ```
+
+   Keep Konsole's `--nofork`: the terminal needs to remain in the service while NoiseChat uses its credential. systemd decrypts the password into a private, read-only runtime file when the service starts and removes that credential when it stops. NoiseChat still needs the plaintext password in memory to log in and renew sessions; the saved `.cred` file remains encrypted. `/quit` closes the chat without automatically restarting it.
+
+3. Create `~/.config/autostart/noisechat.desktop`:
+
+   ```ini
+   [Desktop Entry]
+   Type=Application
+   Name=NoiseChat
+   Exec=systemctl --user start noisechat.service
+   Terminal=false
+   ```
+
+4. Reload the unit and test it before logging out:
+
+   ```sh
+   systemctl --user daemon-reload
+   systemctl --user start noisechat.service
+   ```
+
+   Check `journalctl --user -u noisechat.service` if the terminal does not open. The desktop keyring must be unlocked and allow NoiseChat access to your imported channel key. To disable autostart, remove `~/.config/autostart/noisechat.desktop`; `systemctl --user stop noisechat.service` stops the current chat.
+
+On Hyprland, use this session startup line instead of the KDE autostart file. It imports the display environment before starting the service:
+
+```ini
+exec-once = sh -c 'systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE && systemctl --user start noisechat.service'
+```
+
+You still need an unlocked native keyring and a terminal installed; adjust `ExecStart` for your terminal if you do not use Konsole.
 
 ## HTTP API
 
@@ -517,6 +574,11 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats and shared protocol/file limits, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.18
+
+- Document desktop-login auto-join with a dedicated terminal and an encrypted systemd credential.
+- Reuse `--password-file` with systemd's temporary private credential instead of saving a plaintext server password.
 
 ## v0.4.17
 
