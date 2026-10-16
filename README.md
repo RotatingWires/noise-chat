@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.18
+# NoiseChat v0.4.19
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -325,7 +325,7 @@ Usernames and join/leave announcements remain encrypted. You need each channel's
 
 Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately and publishes a leave announcement; after a crash or lost connection it expires within 60 seconds of the last accepted refresh without publishing a leave event. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join/leave notices are retained like chat messages, so use `users` for current online status.
 
-Upgrade both the relay and clients to v0.4.17 for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
+Keep the relay and clients on the same current release for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
 
 ## Give a friend access
 
@@ -353,7 +353,7 @@ Default client storage uses a native OS credential store:
 
 The client refuses unknown and plaintext keyring backends. Your keyring protects the key at rest according to its configuration; it can be accessible to programs running as your user while unlocked. It cannot protect a compromised client, and the chat key/plaintext necessarily exist in the client process's memory during use. Python does not guarantee secure memory erasure.
 
-`noisechat key list` reads a small alias index kept in the same native keyring and prints each local alias with its derived room ID. The index contains aliases only, never raw keys. Keys created or imported by older releases may not have an index entry; re-import them with `key import ... --replace` under the same alias to record them.
+`noisechat key list` reads a small alias index kept in the same native keyring and prints each local alias with its derived room ID. The index contains aliases only, never raw keys. Missing or damaged keys are removed from that index; a temporary keyring failure reports an error and leaves the index intact so you can retry after unlocking the keyring. Keys created or imported by older releases may not have an index entry; re-import them with `key import ... --replace` under the same alias to record them.
 
 If a Linux machine has no desktop keyring, keep only an encrypted key file and unlock it each time:
 
@@ -470,7 +470,7 @@ Only enable this mode for a listener used by your trusted local connector. Loopb
 
 #### Set it up
 
-1. Install/update NoiseChat from the checkout with `python -m pip install .`. Use v0.4.17 on the relay and clients so leave announcements and the current protocol behavior match. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
+1. Install/update NoiseChat on the relay and clients from the checkout with `python -m pip install .`, keeping both on the same current release. You also need a Cloudflare account and a domain managed by Cloudflare for a permanent public hostname.
 2. Start NoiseChat on the machine that will run `cloudflared`:
 
    ```sh
@@ -574,6 +574,13 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats and shared protocol/file limits, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.19
+
+- Consolidate keyring read-error handling and reuse one selected backend when removing a key.
+- Preserve the local alias index when listing keys encounters a temporary keyring failure; add regression coverage for failures and recovery.
+- Remove redundant exception declarations and their unnecessary imports, and replace stale setup-version pins with guidance to keep relay and clients on the same current release.
+- Preserve encrypted formats, authentication/cooldowns, history retention, terminal editing, notifications, and title behavior. Add no runtime dependencies.
 
 ## v0.4.18
 

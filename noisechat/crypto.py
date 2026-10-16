@@ -1,7 +1,6 @@
 """Versioned message and password-protected key-file formats."""
 
 import base64
-import binascii
 import hashlib
 import json
 import os
@@ -48,7 +47,7 @@ def b64decode(value: str) -> bytes:
         raise NoiseChatError("Invalid encoded data.")
     try:
         decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
-    except (binascii.Error, ValueError):
+    except ValueError:
         raise NoiseChatError("Invalid encoded data.") from None
     if b64encode(decoded) != value:
         raise NoiseChatError("Noncanonical encoded data.")
@@ -152,7 +151,7 @@ def decrypt_message(key: bytes, envelope: str) -> dict:
         raise NoiseChatError("Invalid decrypted message length.")
     try:
         return validate_message(json.loads(padded[4:4 + size]))
-    except (UnicodeError, ValueError, TypeError, RecursionError):
+    except (ValueError, TypeError, RecursionError):
         raise NoiseChatError("Invalid decrypted message.") from None
 
 
@@ -179,7 +178,7 @@ def decrypt_key_file(data: bytes, password: str) -> bytes:
         raise NoiseChatError("Key file is too large.")
     try:
         document = json.loads(data)
-    except (UnicodeError, ValueError, RecursionError):
+    except (ValueError, RecursionError):
         raise NoiseChatError("Invalid key file.") from None
     if (not isinstance(document, dict) or set(document) != KEY_FIELDS
             or document["format"] != "noisechat-key" or type(document["version"]) is not int

@@ -397,7 +397,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.respond(403, {"error": "Cloudflare Tunnel requires a local connector and one valid CF-Connecting-IP header."})
         except RequestTooLargeError:
             self.respond(413, {"error": "Request is too large."})
-        except (NoiseChatError, UnicodeError, ValueError, RecursionError):
+        except (NoiseChatError, ValueError, RecursionError):
             self.respond(400, {"error": "Invalid encrypted message or relay capacity reached."})
         except sqlite3.Error:
             self.respond(503, {"error": "Relay storage unavailable."})
