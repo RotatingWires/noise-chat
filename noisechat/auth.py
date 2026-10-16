@@ -72,7 +72,7 @@ class PasswordVerifier:
             if len(salt) != 16 or len(digest) != 32:
                 raise ValueError()
             return cls(salt, digest)
-        except (ValueError, TypeError, UnicodeError, RecursionError):
+        except (ValueError, TypeError, RecursionError):
             raise NoiseChatError("Invalid server authentication file. Restore it or use run --reset-password locally.") from None
 
     def save(self, path: Path, replace: bool = False) -> None:

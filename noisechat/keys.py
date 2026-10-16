@@ -62,9 +62,10 @@ class KeyStore:
             raise NoiseChatError("Could not save the key in the OS keyring.") from None
 
     def remove(self, alias: str) -> None:
-        self.get(alias)
+        check_alias(alias)
         try:
             backend = native_backend()
+            self._read_key(backend, alias)
             backend.delete_password(SERVICE, alias)
             self._save_aliases(backend, [item for item in self._aliases(backend) if item != alias])
         except KeyringError:
@@ -81,6 +82,8 @@ class KeyStore:
                 try:
                     key = self._read_key(backend, alias)
                 except NoiseChatError:
+                    # Only missing/damaged keys are stale. Backend failures must
+                    # reach the outer handler before the index can be rewritten.
                     continue
                 valid.append(alias)
                 result.append((alias, room_id(key)))
@@ -92,10 +95,7 @@ class KeyStore:
 
     @staticmethod
     def _read_key(backend, alias: str) -> bytes:
-        try:
-            value = backend.get_password(SERVICE, alias)
-        except KeyringError:
-            raise NoiseChatError("Could not unlock/read the OS keyring.") from None
+        value = backend.get_password(SERVICE, alias)
         if value is None:
             raise NoiseChatError("Chat key not found. Create it or import your friend's encrypted key file.")
         key = b64decode(value)
@@ -109,7 +109,7 @@ class KeyStore:
             return []
         try:
             aliases = json.loads(raw)
-        except (TypeError, ValueError, UnicodeError):
+        except (TypeError, ValueError):
             return []
         if not isinstance(aliases, list):
             return []

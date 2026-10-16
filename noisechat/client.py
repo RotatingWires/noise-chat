@@ -12,7 +12,7 @@ import unicodedata
 from collections import OrderedDict
 from datetime import datetime
 from http.client import HTTPException
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -70,13 +70,13 @@ class Client:
             if status == 410:
                 raise ChannelDeletedError() from None
             raise NoiseChatError(f"Relay returned HTTP {status}.") from None
-        except (URLError, TimeoutError, OSError, HTTPException):
+        except (OSError, HTTPException):
             raise NoiseChatError("Could not reach the relay. Check its URL and connection.") from None
         if len(raw) > 1200000:
             raise NoiseChatError("Relay response is too large.")
         try:
             value = json.loads(raw)
-        except (UnicodeError, ValueError, RecursionError):
+        except (ValueError, RecursionError):
             raise NoiseChatError("Relay returned invalid JSON.") from None
         if not isinstance(value, dict):
             raise NoiseChatError("Relay returned an invalid response.")
@@ -109,7 +109,7 @@ class Client:
     def send(self, sender: str, text: str) -> int:
         envelope = encrypt_message(self.key, sender, text)
         # The relay echoes ciphertext back to the sender. Remember local IDs
-        # before posting so a fast poll cannot ring for the local echo.
+        # before posting so a fast poll cannot notify for the local echo.
         message_id = decrypt_message(self.key, envelope)["id"]
         self.sent_message_ids[message_id] = None
         while len(self.sent_message_ids) > 10000:

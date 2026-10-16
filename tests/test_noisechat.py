@@ -13,8 +13,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import get_type_hints
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+
+from keyring.errors import KeyringError
 
 from noisechat import cli
 from noisechat.auth import PasswordVerifier, RelayAccess, ServerAccessError, SESSION_SECONDS
@@ -150,24 +152,71 @@ class KeyTests(unittest.TestCase):
         self.assertIn(room_id(key), output.getvalue())
         self.assertNotIn(key.hex(), output.getvalue())
 
-    def test_key_list_prunes_invalid_index_entries_and_unreadable_keys(self):
-        from keyring.errors import KeyringError
+    def test_key_list_prunes_invalid_index_entries_and_missing_or_damaged_keys(self):
         from noisechat.keys import INDEX_ALIAS, SERVICE
-        class LockedKeyring(MemoryKeyring):
-            def get_password(self, service, name):
-                if name == "locked":
-                    raise KeyringError("locked")
-                return super().get_password(service, name)
-        backend, key = LockedKeyring(), generate_key()
+        backend, key = MemoryKeyring(), generate_key()
         backend.set_password(SERVICE, "friends", b64encode(key))
         backend.set_password(SERVICE, "damaged", b64encode(b"short"))
         backend.set_password(SERVICE, INDEX_ALIAS, json.dumps([
-            "friends", "missing", "damaged", "locked", INDEX_ALIAS, "_invalid", 12]))
+            "friends", "missing", "damaged", INDEX_ALIAS, "_invalid", 12]))
         with patch("noisechat.keys.native_backend", return_value=backend) as select:
             self.assertEqual(KeyStore().list(), [("friends", room_id(key))])
         select.assert_called_once_with()
         self.assertEqual(json.loads(backend.get_password(SERVICE, INDEX_ALIAS)), ["friends"])
         self.assertEqual(backend.get_password(SERVICE, "friends"), b64encode(key))
+
+    def test_key_list_keeps_index_intact_after_temporary_keyring_failure(self):
+        from noisechat.keys import INDEX_ALIAS, SERVICE
+        for failed_alias in (INDEX_ALIAS, "friends", "work"):
+            with self.subTest(failed_alias=failed_alias):
+                backend = MemoryKeyring()
+                with patch("noisechat.keys.native_backend", return_value=backend):
+                    store = KeyStore()
+                    store.put("friends", generate_key())
+                    store.put("work", generate_key())
+                    backend.set_password(SERVICE, INDEX_ALIAS, json.dumps(["missing", "friends", "work"]))
+                    before = backend.values.copy()
+                    read = backend.get_password
+
+                    def temporarily_locked(service, alias):
+                        if alias == failed_alias:
+                            raise KeyringError("private backend details")
+                        return read(service, alias)
+
+                    with patch.object(backend, "get_password", side_effect=temporarily_locked):
+                        with self.assertRaisesRegex(NoiseChatError, "Could not unlock/read") as caught:
+                            store.list()
+                    self.assertNotIn("private backend details", str(caught.exception))
+                    self.assertEqual(backend.values, before)
+                    self.assertEqual([alias for alias, _ in store.list()], ["friends", "work"])
+
+    def test_key_removal_uses_one_selected_backend(self):
+        from noisechat.keys import INDEX_ALIAS, SERVICE
+        backend = MemoryKeyring()
+        with patch("noisechat.keys.native_backend", return_value=backend) as select:
+            store = KeyStore()
+            store.put("friends", generate_key())
+            store.put("work", generate_key())
+            select.reset_mock()
+            store.remove("friends")
+            select.assert_called_once_with()
+        self.assertNotIn((SERVICE, "friends"), backend.values)
+        self.assertIn((SERVICE, "work"), backend.values)
+        self.assertEqual(json.loads(backend.get_password(SERVICE, INDEX_ALIAS)), ["work"])
+
+    def test_key_get_and_remove_report_keyring_failures_without_changes(self):
+        backend = MemoryKeyring()
+        with patch("noisechat.keys.native_backend", return_value=backend):
+            store = KeyStore()
+            store.put("friends", generate_key())
+            before = backend.values.copy()
+            for operation in (store.get, store.remove):
+                with self.subTest(operation=operation.__name__), \
+                        patch.object(backend, "get_password", side_effect=KeyringError("private backend details")):
+                    with self.assertRaises(NoiseChatError) as caught:
+                        operation("friends")
+                    self.assertNotIn("private backend details", str(caught.exception))
+                    self.assertEqual(backend.values, before)
 
     def test_unknown_or_plaintext_backends_are_rejected(self):
         with patch("noisechat.keys.keyring.get_keyring", return_value=MemoryKeyring()):
@@ -1218,10 +1267,12 @@ class ClientTests(unittest.TestCase):
 
     def test_transport_errors_are_reported_without_response_content(self):
         client=Client("http://relay.test",generate_key(),SERVER_PASSWORD)
-        with patch.object(client.opener,"open",side_effect=http.client.BadStatusLine("untrusted response text")):
-            with self.assertRaisesRegex(NoiseChatError,"Could not reach the relay") as caught:
-                client.poll(0,0)
-        self.assertNotIn("untrusted",str(caught.exception))
+        for error in (http.client.BadStatusLine("untrusted response text"), URLError("untrusted response text"),
+                      TimeoutError("untrusted response text"), OSError("untrusted response text")):
+            with self.subTest(error=type(error).__name__), patch.object(client.opener,"open",side_effect=error):
+                with self.assertRaisesRegex(NoiseChatError,"Could not reach the relay") as caught:
+                    client.poll(0,0)
+            self.assertNotIn("untrusted",str(caught.exception))
 
     def test_post_rate_limit_and_bounded_ip_cache(self):
         server=RelayServer.__new__(RelayServer)
