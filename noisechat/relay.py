@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .auth import PasswordVerifier, RelayAccess
 from .crypto import MAX_POLL_MESSAGES, MAX_PRESENCE_PER_ROOM, PRESENCE_TTL, ChannelDeletedError, NoiseChatError, validate_envelope
+from .runtime_logging import console_output
 
 MAX_REQUEST_BYTES = 16384
 MAX_PRESENCE = 1000
@@ -404,7 +405,7 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 
 def console(store: RelayStore, server: RelayServer) -> None:
-    print("Server console: help, channels, delete-channel ROOM_ID, quit", flush=True)
+    console_output("Server console: help, channels, delete-channel ROOM_ID, quit", flush=True)
     while not store.closed:
         try:
             words = input("relay> ").split()
@@ -414,28 +415,28 @@ def console(store: RelayStore, server: RelayServer) -> None:
             continue
         try:
             if words == ["help"]:
-                print("channels: list room IDs, retained packet counts, and online sessions.")
-                print("delete-channel ROOM_ID: erase that channel's history and permanently block its room ID.")
-                print("quit: stop the relay.")
+                console_output("channels: list room IDs, retained packet counts, and online sessions.")
+                console_output("delete-channel ROOM_ID: erase that channel's history and permanently block its room ID.")
+                console_output("quit: stop the relay.")
             elif words == ["channels"]:
                 channels = store.channels()
-                print(f"{'ROOM ID':<64}  PACKETS  ONLINE")
+                console_output(f"{'ROOM ID':<64}  PACKETS  ONLINE")
                 for channel in channels:
-                    print(f"{channel['room']}  {channel['packets']:>7}  {channel['online']:>6}")
+                    console_output(f"{channel['room']}  {channel['packets']:>7}  {channel['online']:>6}")
                 if not channels:
-                    print("No active channels.")
+                    console_output("No active channels.")
             elif len(words) == 2 and words[0] == "delete-channel":
                 packets, sessions = store.delete_channel(words[1])
-                print(f"Channel deleted: {packets} packets removed, {sessions} sessions removed. Room ID permanently blocked.")
+                console_output(f"Channel deleted: {packets} packets removed, {sessions} sessions removed. Room ID permanently blocked.")
             elif words == ["quit"]:
                 server.shutdown()
                 return
             else:
-                print("Unknown console command. Type help.")
+                console_output("Unknown console command. Type help.")
         except NoiseChatError as error:
-            print("Error:", error)
+            console_output("Error:", error)
         except sqlite3.Error:
-            print("Error: Relay database could not be updated.")
+            console_output("Error: Relay database could not be updated.")
 
 
 def serve(host: str, port: int, database: Path, verifier: PasswordVerifier, cloudflare_tunnel: bool = False) -> None:
@@ -445,10 +446,10 @@ def serve(host: str, port: int, database: Path, verifier: PasswordVerifier, clou
     try:
         server = RelayServer((host, port), store, verifier, cloudflare_tunnel=cloudflare_tunnel)
         address = f"[{host}]" if ":" in host else host
-        print(f"NoiseChat v{__version__} relay on http://{address}:{server.server_port}", flush=True)
-        print("Server password required. Stores ciphertext only. Press Ctrl+C to stop.", flush=True)
+        console_output(f"NoiseChat v{__version__} relay on http://{address}:{server.server_port}", flush=True)
+        console_output("Server password required. Stores ciphertext only. Press Ctrl+C to stop.", flush=True)
         if cloudflare_tunnel:
-            print("Cloudflare Tunnel mode: limits use CF-Connecting-IP from the local connector.", flush=True)
+            console_output("Cloudflare Tunnel mode: limits use CF-Connecting-IP from the local connector.", flush=True)
         if sys.stdin.isatty():
             threading.Thread(target=console, args=(store, server), daemon=True).start()
         try:

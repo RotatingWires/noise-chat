@@ -27,6 +27,8 @@ Start the relay in one terminal and choose a server access password of at least 
 noisechat run --urls "http://127.0.0.1:8713"
 ```
 
+The relay also saves timestamped console output to `logs/console.log` beside its database (the current directory by default). The file appends across restarts and resets before exceeding 10 MB, with no backups. HTTP request logging stays disabled; client chat and password prompts are not captured. Server-console `channels` output includes room IDs and counts in this log.
+
 In another terminal with the environment activated, create a channel key once and choose a strong export passphrase:
 
 ```sh

@@ -8,6 +8,7 @@ import stat
 import sys
 import threading
 import warnings
+from contextlib import ExitStack
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,6 +17,7 @@ from .auth import MAX_PASSWORD_BYTES, PasswordVerifier, password_bytes
 from .client import Client, Presence, Receiver, _window_is_focused, notify_message_attention, terminal_text
 from .crypto import MAX_TEXT_BYTES, NoiseChatError, decrypt_key_file, decrypt_message, encrypt_key_file, encrypt_message, generate_key, room_id, validate_sender
 from .keys import KeyStore, check_alias, read_key_file, write_key_file
+from .runtime_logging import console_output, relay_logging
 from .terminal import TerminalAttention, chat_input
 
 DEFAULT_RELAY_URL = "http://127.0.0.1:8713"
@@ -74,7 +76,7 @@ def server_verifier(args) -> PasswordVerifier:
         raise NoiseChatError("Server passwords do not match.")
     verifier = PasswordVerifier.create(password)
     verifier.save(path, replace=args.reset_password)
-    print("Server password configured. Authentication file:", path)
+    console_output("Server password configured. Authentication file:", path)
     return verifier
 
 
@@ -295,53 +297,56 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
-    try:
-        if args.command == "run":
-            host, port = listen_address(args.urls)
-            # Server setup does not touch the OS keyring or load a chat key.
-            from .relay import serve, tunnel_listen_host
-            if args.cloudflare_tunnel:
-                host = tunnel_listen_host(host)
-            serve(host, port, args.database, server_verifier(args), cloudflare_tunnel=args.cloudflare_tunnel)
-        elif args.command == "key":
-            key_command(args)
-        elif args.command == "join":
-            join_command(args)
-        elif args.command == "users":
-            users_command(args)
-        else:
-            key = load_key(args)
-            client = Client(args.server, key, read_server_password(args)) if args.command in {"send", "listen"} else None
-            if client is not None:
-                client.authenticate()
-            if args.command in {"send", "encrypt"}:
-                text = read_text(args.stdin)
-                if args.command == "encrypt":
-                    print(encrypt_message(key, args.name, text))
-                else:
-                    receipt = client.send(args.name, text)
-                    print(f"Accepted by relay (sequence {receipt}). This is not a read receipt.")
-            elif args.command == "decrypt":
-                envelope = input("Ciphertext: ").strip()
-                from .client import render_message
-                print(render_message(decrypt_message(key, envelope)))
-            elif args.command == "listen":
-                if args.after < 0 or args.after >= 2**63:
-                    raise NoiseChatError("--after must be a nonnegative relay sequence number.")
-                receiver = Receiver(client)
-                receiver.cursor = args.after
-                if args.once:
-                    receiver.receive(wait=0)
-                    print(f"[Cursor: {receiver.cursor}]")
-                else:
-                    receiver.listen(threading.Event())
-    except sqlite3.Error:
-        print("Error: Relay database could not be opened or updated.", file=sys.stderr)
-        return 1
-    except (NoiseChatError, OSError, UnicodeError) as error:
-        # OS errors may contain local paths but never include key material.
-        print("Error:", terminal_text(str(error)), file=sys.stderr)
-        return 1
-    except (KeyboardInterrupt, EOFError):
+    output = console_output if args.command == "run" else print
+    with ExitStack() as runtime:
+        try:
+            if args.command == "run":
+                runtime.enter_context(relay_logging(args.database.parent / "logs" / "console.log"))
+                host, port = listen_address(args.urls)
+                # Server setup does not touch the OS keyring or load a chat key.
+                from .relay import serve, tunnel_listen_host
+                if args.cloudflare_tunnel:
+                    host = tunnel_listen_host(host)
+                serve(host, port, args.database, server_verifier(args), cloudflare_tunnel=args.cloudflare_tunnel)
+            elif args.command == "key":
+                key_command(args)
+            elif args.command == "join":
+                join_command(args)
+            elif args.command == "users":
+                users_command(args)
+            else:
+                key = load_key(args)
+                client = Client(args.server, key, read_server_password(args)) if args.command in {"send", "listen"} else None
+                if client is not None:
+                    client.authenticate()
+                if args.command in {"send", "encrypt"}:
+                    text = read_text(args.stdin)
+                    if args.command == "encrypt":
+                        print(encrypt_message(key, args.name, text))
+                    else:
+                        receipt = client.send(args.name, text)
+                        print(f"Accepted by relay (sequence {receipt}). This is not a read receipt.")
+                elif args.command == "decrypt":
+                    envelope = input("Ciphertext: ").strip()
+                    from .client import render_message
+                    print(render_message(decrypt_message(key, envelope)))
+                elif args.command == "listen":
+                    if args.after < 0 or args.after >= 2**63:
+                        raise NoiseChatError("--after must be a nonnegative relay sequence number.")
+                    receiver = Receiver(client)
+                    receiver.cursor = args.after
+                    if args.once:
+                        receiver.receive(wait=0)
+                        print(f"[Cursor: {receiver.cursor}]")
+                    else:
+                        receiver.listen(threading.Event())
+        except sqlite3.Error:
+            output("Error: Relay database could not be opened or updated.", file=sys.stderr)
+            return 1
+        except (NoiseChatError, OSError, UnicodeError) as error:
+            # OS errors may contain local paths but never include key material.
+            output("Error:", terminal_text(str(error)), file=sys.stderr)
+            return 1
+        except (KeyboardInterrupt, EOFError):
+            return 0
         return 0
-    return 0

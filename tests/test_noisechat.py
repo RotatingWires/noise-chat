@@ -1223,6 +1223,10 @@ class RunTests(unittest.TestCase):
                 else:
                     console_input.assert_not_called()
                     self.assertNotIn("Server console", output.getvalue())
+                log = (Path(directory) / "logs" / "console.log").read_text()
+                self.assertIn("relay on http://127.0.0.1:8713", log)
+                self.assertEqual("Server console" in log, interactive)
+                self.assertNotIn(SERVER_PASSWORD, log)
 
     def test_default_and_custom_listen_urls_start_relay_without_client_keys(self):
         with patch("noisechat.cli.server_verifier", return_value=SERVER_VERIFIER), patch("noisechat.relay.serve") as serve, patch("noisechat.cli.KeyStore", side_effect=AssertionError("A relay must not load client keys")):

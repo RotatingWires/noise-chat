@@ -310,6 +310,8 @@ Inside the running relay's **server console** (`relay>`), not a client chat or s
 
 The console reads only the relay process's attached terminal. It is disabled without an interactive terminal, such as a background service with no console. There is no HTTP administration endpoint and no `noisechat delete-channel` client command. To administer a service this way, stop it and run the relay interactively with the same `--database` path; issue console commands, then stop the interactive relay and restart the service.
 
+`noisechat run` saves timestamped startup, setup, server-console, and reported error messages to `logs/console.log` beside the database. With the default `relay.sqlite3`, that means `logs/console.log` in the working directory. The directory is created automatically and ignored by Git. The same file is appended across restarts and cleared before a new record would exceed 10 MB; no backup logs are kept. Terminal output remains available. HTTP request details, hidden password prompts, and client chat output are not captured. Running `channels` writes its displayed room IDs and packet/online counts to the log, so keep the log private alongside the database.
+
 ## Connected users and channels
 
 From another terminal, list every connected chat session in one or more channels:

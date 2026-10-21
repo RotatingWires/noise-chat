@@ -10,3 +10,4 @@ dist/
 *.noise-key
 *.auth.json
 *.noise-password
+logs/
