@@ -481,24 +481,74 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(receiver.receive(0), 1)
         self.assertIn("[Wall] Alice left the chat.", output[-1])
 
-    def test_refresh_expiry_and_rejoin_after_relay_restart(self):
+    def test_refresh_expiry_and_silent_reconnect_after_relay_restart(self):
         with patch("noisechat.relay.time.monotonic", return_value=100):
             self.alice.connect("a" * 64, "Alice")
             self.bob.connect("b" * 64, "Bob")
         with patch("noisechat.relay.time.monotonic", return_value=140):
-            self.alice.connect("a" * 64, "Alice")
+            self.alice.connect("a" * 64, "Alice", announce=False)
         with patch("noisechat.relay.time.monotonic", return_value=160):
             self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
         with patch("noisechat.relay.time.monotonic", return_value=200):
             self.assertEqual(self.bob.users(), [])
-            self.alice.connect("a" * 64, "Alice")
-            self.assertEqual(len(self.bob.poll(0, 0)), 3, "An expired session announces its new join.")
+            self.alice.connect("a" * 64, "Alice", announce=False)
+            self.assertEqual(len(self.bob.poll(0, 0)), 2, "Restoring expired presence must not announce another join.")
         self.store.close()
         self.store = RelayStore(self.path)
         self.wire.server.store = self.store
         self.assertEqual(self.bob.users(), [], "Restart must not restore stale online sessions.")
-        self.alice.connect("a" * 64, "Alice")
+        self.alice.connect("a" * 64, "Alice", announce=False)
         self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+        self.assertEqual(len(self.bob.poll(0, 0)), 2, "A relay restart must not add another join announcement.")
+
+    def test_running_presence_announces_only_when_chat_is_opened(self):
+        presence = Presence(self.alice, "Alice", lambda text: None)
+        with patch("noisechat.relay.time.monotonic", return_value=100), patch.object(presence.thread, "start"):
+            presence.start()
+        initial = self.bob.poll(0, 0)
+        self.assertEqual(len(initial), 1)
+        self.assertEqual(decrypt_message(self.key, initial[0]["envelope"])["kind"], "join")
+        for now in (200, 300, 400):
+            with self.subTest(wake=now), patch("noisechat.relay.time.monotonic", return_value=now):
+                self.assertEqual(self.bob.users(), [])
+                with patch.object(presence.stop, "wait", side_effect=[False, True]):
+                    presence.maintain()
+                self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+                self.assertEqual(self.bob.poll(0, 0), initial)
+        self.store.close()
+        self.store = RelayStore(self.path)
+        self.wire.server.store = self.store
+        self.wire.server.access = RelayAccess(SERVER_VERIFIER)
+        with patch.object(presence.stop, "wait", side_effect=[False, True]):
+            presence.maintain()
+        self.assertEqual([user["sender"] for user in self.bob.users()], ["Alice"])
+        self.assertEqual(self.bob.poll(0, 0), initial)
+        with patch.object(presence.thread, "join"):
+            presence.close()
+        self.assertEqual(self.bob.users(), [])
+        reopened = Presence(self.alice, "Alice", lambda text: None)
+        with patch.object(reopened.thread, "start"):
+            reopened.start()
+        self.assertNotEqual(reopened.token, presence.token)
+        messages = [decrypt_message(self.key, record["envelope"]) for record in self.bob.poll(0, 0)]
+        self.assertEqual([message["kind"] for message in messages], ["join", "leave", "join"])
+
+    def test_silent_presence_enforces_capacity_and_deleted_channels(self):
+        with patch("noisechat.relay.MAX_PRESENCE_PER_ROOM", 1):
+            self.alice.connect("a" * 64, "Alice", announce=False)
+            with self.assertRaises(NoiseChatError):
+                self.bob.connect("b" * 64, "Bob", announce=False)
+        with patch("noisechat.relay.MAX_PRESENCE", 1):
+            with self.assertRaises(NoiseChatError):
+                self.client(generate_key()).connect("c" * 64, "Carol", announce=False)
+        self.client(generate_key()).connect("d" * 64, "Dave", announce=False)
+        with self.assertRaises(NoiseChatError):
+            self.client(generate_key()).connect("e" * 64, "Eve", announce=False)
+        self.assertEqual(self.bob.poll(0, 0), [])
+        self.assertEqual(len(self.store.presence), 2)
+        self.store.delete_channel(room_id(self.key))
+        with self.assertRaises(ChannelDeletedError):
+            self.alice.connect("a" * 64, "Alice", announce=False)
 
     def test_same_name_sessions_and_private_departure_tokens(self):
         self.alice.connect("a" * 64, "Alice")
@@ -533,7 +583,8 @@ class RelayTests(unittest.TestCase):
         room = room_id(self.key)
         post = f"POST /v1/rooms/{room}/presence HTTP/1.0\r\nContent-Type: application/json\r\n"
         for body in [{}, {"token": []}, {"token": "short"}, {"token": "a" * 64, "envelope": "plaintext"},
-                     {"token": "a" * 64, "envelope": "bad", "announcement": "bad"}]:
+                     {"token": "a" * 64, "envelope": "bad", "announcement": "bad"},
+                     {"token": "a" * 64, "envelope": encrypt_event(self.key, "Alice", "presence"), "announcement": None}]:
             data = json.dumps(body).encode()
             response = self.wire.raw((post + f"Content-Length: {len(data)}\r\n\r\n").encode() + data)
             self.assertEqual(response.status, 400)

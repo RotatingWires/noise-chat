@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.19
+# NoiseChat v0.4.20
 
 An encrypted terminal chat with a self-hosted relay, shared channel keys, persistent ciphertext history, and Windows/Linux clients.
 
@@ -37,6 +37,8 @@ noisechat join friends --server "http://127.0.0.1:8713" --name Alice
 ```
 
 The raw chat key goes into your OS keyring; `friends.noise-key` is an encrypted export. Open another terminal and join the same channel as Bob to test. Clients prompt for the separate server access password. Type a message and press Enter; `/users` lists connected users and `/quit` exits.
+
+Opening a chat announces your arrival once. Leaving it open through sleep, connection loss, or a relay restart restores your online status silently. Quitting still announces your departure. Update both the relay and clients to v0.4.20 or newer for silent reconnects.
 
 For another device, share the **same encrypted key export**, its passphrase, and the server password privately. Import with `noisechat key import friends /path/to/friends.noise-key`, then join using your relay's HTTPS URL. Creating another key with the same local name creates a different channel. For systems without a desktop keyring, see [key-file mode](MANUAL.md#key-storage).
 

@@ -1,7 +1,7 @@
 > [!WARNING]
 > This project is fully vibecoded, probably inefficient, but it does what I wanted lol
 
-# NoiseChat v0.4.19
+# NoiseChat v0.4.20
 
 A basic Windows/Linux CLI chat. You type a message and press Enter; your client encrypts it, a relay stores and forwards the ciphertext, and your friends' clients decrypt it locally. The relay never receives the chat key, display names, or message text.
 
@@ -145,7 +145,9 @@ The default relay base URL is `http://localhost:8713`; use your relay's HTTPS ho
 
 ### Presence requests
 
-To join or refresh, send exactly `{token, envelope, announcement}`. Here `token` is a client-generated 64-character lowercase hexadecimal **presence token**, separate from the server login token. `envelope` encrypts the user's presence/name, and `announcement` encrypts a join wall message. A new session stores the join announcement in normal room history and returns `joined: true`; refreshes update its expiry without storing another join announcement and return `joined: false`.
+To open a chat, send exactly `{token, envelope, announcement}`. Here `token` is a client-generated 64-character lowercase hexadecimal **presence token**, separate from the server login token. `envelope` encrypts the user's presence/name, and `announcement` encrypts a join wall message. A new live session stores the supplied join announcement in normal room history and returns `joined: true`; refreshing an existing live session returns `joined: false` without storing another announcement.
+
+After the initial connection succeeds, the CLI sends `{token, envelope}` on every heartbeat. This refreshes existing presence or silently restores it after sleep, connection loss, or a relay restart. `joined` indicates whether live presence was newly registered, even when no announcement was supplied. Both forms enforce the same room and session limits. The relay still accepts the announcement-bearing refreshes sent by older clients; those clients can announce again after expiry. Update the relay and clients to v0.4.20 or newer for silent reconnects.
 
 Presence expires after 60 seconds without refresh; the CLI refreshes every 20 seconds. The relay allows up to 100 live sessions per room and 1,000 in total. Expiry removes presence without generating a leave wall message.
 
@@ -325,7 +327,7 @@ The output has `USER` and `CHANNEL` columns. Channel labels are your local key a
 
 Usernames and join/leave announcements remain encrypted. You need each channel's key to identify its connected users; there is no public server-wide directory of plaintext names or channels. `users` itself does not join or announce a new user. Invalid encrypted roster entries are ignored.
 
-Interactive chat refreshes its presence every 20 seconds. A normal exit removes the session immediately and publishes a leave announcement; after a crash or lost connection it expires within 60 seconds of the last accepted refresh without publishing a leave event. The relay keeps this presence state only in memory. After a relay restart, running clients register again on their next refresh and announce their return. Historical join/leave notices are retained like chat messages, so use `users` for current online status.
+Interactive chat announces a join once when opened and refreshes its presence every 20 seconds. A normal exit removes the session immediately and publishes a leave announcement; after a crash or lost connection it expires within 60 seconds of the last accepted refresh without publishing a leave event. The relay keeps this presence state only in memory. Running clients silently register again on their next successful refresh after sleep, connection loss, or a relay restart. Closing and reopening the chat starts a new session and announces a new join. Historical join/leave notices are retained like chat messages, so use `users` for current online status.
 
 Keep the relay and clients on the same current release for the current presence, join/leave, and notification behavior. Older clients can still exchange text messages, but cannot interpret the newer encrypted event types.
 
@@ -576,6 +578,12 @@ python -m compileall -q noisechat tests
 Tests cover randomized encryption, Unicode, authentication failures, server-password setup/reset/persistence, unauthenticated channel rejection, login cooldowns and session expiry/restart, Cloudflare visitor-IP isolation and normalization, rejected/untrusted forwarding headers, tunnel listener restrictions, private password files, key-file tampering/passwords, keyring overwrite protection, exclusive exports, two-client exchange through the real HTTP handler, encrypted message wire/database contents, encrypted join notices and user rosters, presence expiry/refresh/departure, room isolation, persistence/retention, rate limiting, polling, replay rejection, terminal escapes, submitted-input clearing, wrapped Unicode drafts during incoming output, and stream restoration on interruption. The native TCP test runs when sockets are allowed and explicitly skips in restricted environments. Keyring operations are tested with an in-memory test backend; a real OS keyring must be available for normal key creation/import.
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats and shared protocol/file limits, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
+
+## v0.4.20
+
+- Announce joins once per newly opened chat; restore online presence silently after sleep, connection loss, or relay restart.
+- Keep presence expiry, online rosters, explicit leave announcements, and room/session limits unchanged. Update both relay and clients for silent reconnects.
+- Save relay console output to timestamped `logs/console.log` beside the database, capped at 10 MB without backup files.
 
 ## v0.4.19
 

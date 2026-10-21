@@ -137,9 +137,10 @@ class Client:
             last = message["sequence"]
         return messages
 
-    def connect(self, token: str, sender: str) -> None:
-        body = {"token": token, "envelope": encrypt_event(self.key, sender, "presence"),
-                "announcement": encrypt_event(self.key, sender, "join")}
+    def connect(self, token: str, sender: str, *, announce: bool = True) -> None:
+        body = {"token": token, "envelope": encrypt_event(self.key, sender, "presence")}
+        if announce:
+            body["announcement"] = encrypt_event(self.key, sender, "join")
         value = self.request("POST", body=body, resource="presence", timeout=5)
         if type(value.get("joined")) is not bool:
             raise NoiseChatError("Relay returned an invalid presence receipt.")
@@ -185,7 +186,8 @@ class Presence:
         delay, offline = PRESENCE_HEARTBEAT, False
         while not self.stop.wait(delay):
             try:
-                self.client.connect(self.token, self.sender)
+                # A running chat stays the same session across sleep or relay restarts.
+                self.client.connect(self.token, self.sender, announce=False)
                 if offline:
                     self.output("[Online status restored.]")
                 delay, offline = PRESENCE_HEARTBEAT, False

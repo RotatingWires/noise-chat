@@ -117,9 +117,10 @@ class RelayStore:
         if room not in rooms and len(rooms) >= self.max_rooms:
             raise NoiseChatError("Relay room capacity reached.")
 
-    def connect(self, room: str, token: str, envelope: str, announcement: str) -> bool:
+    def connect(self, room: str, token: str, envelope: str, announcement: str | None = None) -> bool:
         validate_envelope(envelope)
-        validate_envelope(announcement)
+        if announcement is not None:
+            validate_envelope(announcement)
         with self.condition:
             self.check_available(room)
             self.prune_presence()
@@ -129,8 +130,11 @@ class RelayStore:
                 if (len(self.presence) >= MAX_PRESENCE or
                         sum(channel == room for channel, _ in self.presence) >= MAX_PRESENCE_PER_ROOM):
                     raise NoiseChatError("Relay user capacity reached.")
-                # Publish once per live session, including retries after a lost receipt.
-                self.post(room, announcement)
+                self.check_room_capacity(room)
+                # Only a newly opened chat supplies an announcement. Heartbeats
+                # can restore expired presence without adding anything to history.
+                if announcement is not None:
+                    self.post(room, announcement)
             self.presence[session] = (envelope, time.monotonic() + PRESENCE_TTL)
             return joined
 
@@ -378,14 +382,16 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             body = self.read_json()
             if resource == "presence":
-                if (not isinstance(body, dict) or set(body) not in ({"token"}, {"token", "announcement"}, {"token", "envelope", "announcement"})
+                if (not isinstance(body, dict) or set(body) not in ({"token"}, {"token", "announcement"}, {"token", "envelope"}, {"token", "envelope", "announcement"})
                         or not isinstance(body.get("token"), str) or not re.fullmatch(r"[0-9a-f]{64}", body["token"])):
                     raise NoiseChatError("Invalid presence request.")
+                if "announcement" in body:
+                    validate_envelope(body["announcement"])
                 if set(body) in ({"token"}, {"token", "announcement"}):
                     self.server.store.disconnect(room, body["token"], body.get("announcement"))
                     self.respond(200, {"left": True})
                 else:
-                    joined = self.server.store.connect(room, body["token"], body["envelope"], body["announcement"])
+                    joined = self.server.store.connect(room, body["token"], body["envelope"], body.get("announcement"))
                     self.respond(200, {"joined": joined})
                 return
             if not isinstance(body, dict) or set(body) != {"envelope"}:
