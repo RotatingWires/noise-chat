@@ -7,7 +7,7 @@ A basic Windows/Linux CLI chat. You type a message and press Enter; your client 
 
 One shared random key identifies one chat. Give friends a password-encrypted copy on a USB drive and your separate server access password. They import the chat key into their device's keyring, then connect to the same relay. No accounts, web interface, or audio in this first version.
 
-## Project stack
+## Technology stack
 
 - Python 3.11 or newer for the CLI client and relay.
 - Python `argparse` for commands and options.
@@ -568,7 +568,7 @@ All shared-key holders can read all messages and use any display name. Names are
 
 This is an initial implementation built on standard cryptography libraries, not a security-audited messaging protocol. Audio, per-person identities/keys, forward secrecy, and persistent replay state are future work.
 
-## Development
+## Development checks
 
 ```sh
 python -m unittest discover -s tests -v
@@ -579,42 +579,44 @@ Tests cover randomized encryption, Unicode, authentication failures, server-pass
 
 `pyproject.toml` owns the release version and dependency declarations. `noisechat/` is split into crypto formats and shared protocol/file limits, OS-key storage, server access, relay, client, terminal input, and CLI responsibilities. There are no runtime overrides or frontend build tools. `python -m noisechat` works from the source checkout once dependencies are installed; installing the package provides the `noisechat` entry point.
 
-## v0.4.20
+## Release notes
+
+### v0.4.20
 
 - Announce joins once per newly opened chat; restore online presence silently after sleep, connection loss, or relay restart.
 - Keep presence expiry, online rosters, explicit leave announcements, and room/session limits unchanged. Update both relay and clients for silent reconnects.
 - Save relay console output to timestamped `logs/console.log` beside the database, capped at 10 MB without backup files.
 
-## v0.4.19
+### v0.4.19
 
 - Consolidate keyring read-error handling and reuse one selected backend when removing a key.
 - Preserve the local alias index when listing keys encounters a temporary keyring failure; add regression coverage for failures and recovery.
 - Remove redundant exception declarations and their unnecessary imports, and replace stale setup-version pins with guidance to keep relay and clients on the same current release.
 - Preserve encrypted formats, authentication/cooldowns, history retention, terminal editing, notifications, and title behavior. Add no runtime dependencies.
 
-## v0.4.18
+### v0.4.18
 
 - Document desktop-login auto-join with a dedicated terminal and an encrypted systemd credential.
 - Reuse `--password-file` with systemd's temporary private credential instead of saving a plaintext server password.
 
-## v0.4.17
+### v0.4.17
 
 - Add explicit word/draft navigation and word deletion to the interactive prompt.
 - Distinguish regular Backspace from Ctrl+Backspace using terminal/native input conventions and support explicit modified-key sequences.
 - Preserve Unicode drafts, bracketed paste, incoming output, notification/title behavior, and plain redirected input.
 - Add editing regression tests and document the shortcuts.
 
-## v0.4.16
+### v0.4.16
 
 - Fix NoiseChat failing to start because `KeyStore.list()` shadowed the built-in `list` in later class type annotations.
 - Add regression coverage for the affected annotations, with no changes to stored keys, encryption, or the relay protocol.
 
-## v0.4.15
+### v0.4.15
 
 - Document every relay HTTP route, password/session authorization, encrypted payloads, presence lifecycle, polling/history, errors, and request limits.
 - Clarify room routing versus access, separate presence tokens from login tokens, and identify server-console-only operations.
 
-## v0.4.14
+### v0.4.14
 
 - Consolidate Hyprland detection and the KDE/X11 focus-probe branches.
 - Reuse the selected keyring while listing keys; share alias validation and remove unreachable reserved-name checks.
@@ -623,76 +625,76 @@ Tests cover randomized encryption, Unicode, authentication failures, server-pass
 - Preserve notification/title behavior, history ordering, encrypted formats, older-client compatibility, and relay retention.
 - Audit found no orphan source files or unused imports; add no runtime dependencies.
 
-## v0.4.13
+### v0.4.13
 
 - Update Konsole tab titles even when the profile normally shows the directory and program name.
 - Print joining instructions after all initial history batches have loaded.
 - Keep history loading quiet and preserve notification behavior for live messages.
 
-## v0.4.12
+### v0.4.12
 
 - Route unread terminal titles through the prompt renderer, preserving drafts and avoiding escaped text and terminal bells.
 - Reset the title on focus and keep Windows window detection stable across title changes.
 - Prefer desktop notification services on Hyprland and allow its focus probe more time.
 - Document notification setup and the behavior of focused windows with multiple tabs.
 
-## v0.4.10
+### v0.4.10
 
 - Make KDE Wayland focus detection reliable when `kdotool` needs more than a short D-Bus startup window.
 - Prefer `kdotool` over X11 tools on KDE Wayland so notifications are not incorrectly suppressed.
 
-## v0.4.9
+### v0.4.9
 
 - Show desktop notifications and taskbar attention only after confirming the chat window is out of focus.
 - Add KDE Wayland `kdotool` focus detection and keep unknown compositor focus states quiet.
 
-## v0.4.8
+### v0.4.8
 
 - Remove terminal sound output completely; incoming messages use desktop notifications and Windows taskbar attention only.
 - Add native Hyprland notifications plus `dunstify` fallback support for Arch/Linux desktops.
 - Resolve a visible Windows Terminal window by console title before attempting taskbar flashing.
 
-## v0.4.7
+### v0.4.7
 
 - Add best-effort desktop notifications for Windows, Fedora/KDE, and macOS.
 - Correct the Windows `FLASHWINFO` structure and use taskbar/caption flashing when the terminal supports it.
 
-## v0.4.6
+### v0.4.6
 
 - Print a private join-time help message with the `/users` and `/quit` commands.
 - Notify only for received text messages; local relay echoes remain silent.
 
-## v0.4.5
+### v0.4.5
 
 - Publish encrypted leave wall announcements for clean client disconnects.
 - Add `noisechat key list` for local key aliases and room IDs.
 - Add desktop attention notifications for incoming messages and request Windows taskbar flashes when supported.
 - Document the Cloudflare Browser Integrity Check exception that may be needed for CLI traffic.
 
-## v0.4.4
+### v0.4.4
 
 - Rename the interactive channel command to `join` and update the command reference, examples, and transport tests.
 - Clarify the 12-hour token lifetime and why starting a new client prompts for the server password again.
 
-## v0.4.3
+### v0.4.3
 
 - Simplify the invalid server-password input error to `Password incorrect`.
 
-## v0.4.2
+### v0.4.2
 
 - Show the minimum length in the first-run server-password prompt.
 - Clear submitted chat input so each message appears only in the relay output; preserve drafts when incoming messages arrive.
 - Clarify retained-message storage and automatic history display.
 - Verify that server-console channel deletion removes all of that channel's messages.
 
-## v0.4.1
+### v0.4.1
 
 - Add an explicit Cloudflare Tunnel mode with loopback-only origin binding.
 - Use validated, normalized `CF-Connecting-IP` addresses for login cooldowns and POST rate limits.
 - Reject missing, malformed, duplicate, and nonlocal forwarding requests; preserve direct-mode IP handling.
 - Document tunnel behavior, setup, password protection, and troubleshooting.
 
-## v0.4.0
+### v0.4.0
 
 - Require a separate server access password and temporary login token for channel endpoints.
 - Save a salted PBKDF2-HMAC-SHA256 verifier locally; configure/reset passwords only before starting the server.
@@ -701,7 +703,7 @@ Tests cover randomized encryption, Unicode, authentication failures, server-pass
 - Reauthenticate after session expiry or relay restart; stop background attempts on wrong passwords or login cooldowns.
 - Update setup, command reference, database storage, and Cloudflare Tunnel instructions.
 
-## v0.3.0
+### v0.3.0
 
 - Add server-console channel listing and deletion, without an HTTP administration API or client deletion command.
 - Remove deleted channels' history and presence and persistently block their room IDs.
@@ -709,14 +711,14 @@ Tests cover randomized encryption, Unicode, authentication failures, server-pass
 - Document Cloudflare Tunnel access controls, database contents, and automatic history display.
 - Replace the manual database deletion instructions with the server console command.
 
-## v0.2.1
+### v0.2.1
 
 - Add Project stack and Backend sections describing the runtime, dependencies, HTTP API, and storage.
 - Rename the relay command to `run` and set the listen IP/host and port with `--urls`.
 - Change the default listen port to 8713 and update every connection example.
 - Document custom ports, startup/service overrides, the source default, and IPv4/IPv6 listen addresses.
 
-## v0.2.0
+### v0.2.0
 
 - Document every command, option, and interactive chat command.
 - Explain the built-in Python HTTP server and JSON relay API.
@@ -724,7 +726,7 @@ Tests cover randomized encryption, Unicode, authentication failures, server-pass
 - Add `users` for connected users across specified channels and `/users` inside chat.
 - Keep usernames encrypted; expire abandoned sessions and remove presence on normal exit.
 
-## v0.1.0
+### v0.1.0
 
 - Add interactive chat, one-message send, continuous/one-batch receive, and offline encryption/decryption.
 - Add random shared-key creation, native-keyring import/export/removal, and password-protected USB key files.
